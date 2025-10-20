@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -94,12 +95,23 @@ class VideoExportWorker(QObject):
         xs = np.clip(xs, 0, w - 1)
         ys = np.clip(ys, 0, h - 1)
 
-        if np.any(ps == 1):
-            idx = (ys[ps == 1], xs[ps == 1])
-            canvas[idx] = np.minimum(1.0, canvas[idx] + self.pos_colour)
-        if np.any(ps == 0):
-            idx = (ys[ps == 0], xs[ps == 0])
-            canvas[idx] = np.minimum(1.0, canvas[idx] + self.neg_colour)
+        pos_mask = ps == 1
+        if np.any(pos_mask):
+            y_pos = ys[pos_mask]
+            x_pos = xs[pos_mask]
+            np.add.at(canvas[..., 0], (y_pos, x_pos), self.pos_colour[0])
+            np.add.at(canvas[..., 1], (y_pos, x_pos), self.pos_colour[1])
+            np.add.at(canvas[..., 2], (y_pos, x_pos), self.pos_colour[2])
+
+        neg_mask = ps == 0
+        if np.any(neg_mask):
+            y_neg = ys[neg_mask]
+            x_neg = xs[neg_mask]
+            np.add.at(canvas[..., 0], (y_neg, x_neg), self.neg_colour[0])
+            np.add.at(canvas[..., 1], (y_neg, x_neg), self.neg_colour[1])
+            np.add.at(canvas[..., 2], (y_neg, x_neg), self.neg_colour[2])
+
+        np.clip(canvas, 0.0, 1.0, out=canvas)
 
     def _write_frame(self, writer, canvas: np.ndarray) -> None:
         rgb8 = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
@@ -154,7 +166,7 @@ class VideoExportWorker(QObject):
         frame_interval_us = 1e6 / self.fps
         effective_interval_us = frame_interval_us * self.playback_speed
         canvas = np.zeros((frame_size[1], frame_size[0], 3), np.float32)
-        buffers: list[np.ndarray] = []
+        buffers: deque[np.ndarray] = deque()
         empty_events: Optional[np.ndarray] = None
         last_frame_time: float | None = None
 
@@ -179,24 +191,34 @@ class VideoExportWorker(QObject):
 
                 while last_frame_time is not None and slice_end - last_frame_time >= effective_interval_us:
                     cutoff = last_frame_time + effective_interval_us
+                    frame_chunks: list[np.ndarray] = []
+                    while buffers and buffers[0]["t"][-1] < cutoff:
+                        frame_chunks.append(buffers.popleft())
+
                     if buffers:
-                        combined = buffers[0] if len(buffers) == 1 else np.concatenate(buffers)
+                        current = buffers[0]
+                        mask = current["t"] < cutoff
+                        if np.any(mask):
+                            frame_chunks.append(current[mask])
+                            remaining = current[~mask]
+                            if remaining.size:
+                                buffers[0] = remaining
+                            else:
+                                buffers.popleft()
+
+                    if frame_chunks:
+                        frame_events = frame_chunks[0] if len(frame_chunks) == 1 else np.concatenate(frame_chunks)
                     else:
-                        combined = empty_events if empty_events is not None else np.empty(0, dtype=events.dtype)
-                    if combined.size > 0:
-                        frame_mask = combined["t"] < cutoff
-                        frame_events = combined[frame_mask]
-                        remaining = combined[~frame_mask]
-                        buffers = [remaining] if remaining.size > 0 else []
-                    else:
-                        frame_events = combined
-                        buffers = []
+                        frame_events = empty_events if empty_events is not None else np.empty(0, dtype=events.dtype)
+
                     self._composite_frame(canvas, frame_events)
                     self._write_frame(writer, canvas)
                     last_frame_time = cutoff
 
             if buffers:
-                combined = buffers[0] if len(buffers) == 1 else np.concatenate(buffers)
+                remaining_events = list(buffers)
+                buffers.clear()
+                combined = remaining_events[0] if len(remaining_events) == 1 else np.concatenate(remaining_events)
                 self._composite_frame(canvas, combined)
                 self._write_frame(writer, canvas)
         except Exception as exc:
@@ -223,6 +245,8 @@ class MainWindow(QMainWindow):
         self.playback_speed = 1.0
         self.view_fps_cap = 60
         self.colors = ViewColors()
+        self._pos_colour_vec = np.zeros(3, dtype=np.float32)
+        self._neg_colour_vec = np.zeros(3, dtype=np.float32)
         self.meta_width = 640
         self.meta_height = 480
         self.current_time_us = 0
@@ -277,6 +301,8 @@ class MainWindow(QMainWindow):
         self._apply_view_fps_cap()
 
         self._bind_shortcuts()
+
+        self._update_color_cache()
 
         if initial_file:
             try:
@@ -425,6 +451,11 @@ class MainWindow(QMainWindow):
         if c.isValid(): self.colors.pos = (c.red(), c.green(), c.blue())
         c2 = QColorDialog.getColor(QColor(*self.colors.neg), self, "Negative Polarity Colour")
         if c2.isValid(): self.colors.neg = (c2.red(), c2.green(), c2.blue())
+        self._update_color_cache()
+
+    def _update_color_cache(self) -> None:
+        self._pos_colour_vec = np.array(self.colors.pos, dtype=np.float32) / 255.0
+        self._neg_colour_vec = np.array(self.colors.neg, dtype=np.float32) / 255.0
 
     # ---------- Playback ----------
 
@@ -556,15 +587,23 @@ class MainWindow(QMainWindow):
         xs = np.clip(xs, 0, self.meta_width - 1)
         ys = np.clip(ys, 0, self.meta_height - 1)
 
-        pos = np.array(self.colors.pos, dtype=np.float32) / 255.0
-        neg = np.array(self.colors.neg, dtype=np.float32) / 255.0
+        pos_mask = ps == 1
+        if np.any(pos_mask):
+            y_pos = ys[pos_mask]
+            x_pos = xs[pos_mask]
+            np.add.at(self.canvas[..., 0], (y_pos, x_pos), self._pos_colour_vec[0])
+            np.add.at(self.canvas[..., 1], (y_pos, x_pos), self._pos_colour_vec[1])
+            np.add.at(self.canvas[..., 2], (y_pos, x_pos), self._pos_colour_vec[2])
 
-        if np.any(ps == 1):
-            idx = (ys[ps == 1], xs[ps == 1])
-            self.canvas[idx] = np.minimum(1.0, self.canvas[idx] + pos)
-        if np.any(ps == 0):
-            idx = (ys[ps == 0], xs[ps == 0])
-            self.canvas[idx] = np.minimum(1.0, self.canvas[idx] + neg)
+        neg_mask = ps == 0
+        if np.any(neg_mask):
+            y_neg = ys[neg_mask]
+            x_neg = xs[neg_mask]
+            np.add.at(self.canvas[..., 0], (y_neg, x_neg), self._neg_colour_vec[0])
+            np.add.at(self.canvas[..., 1], (y_neg, x_neg), self._neg_colour_vec[1])
+            np.add.at(self.canvas[..., 2], (y_neg, x_neg), self._neg_colour_vec[2])
+
+        np.clip(self.canvas, 0.0, 1.0, out=self.canvas)
 
         try:
             self.current_time_us = int(ev["t"][-1])
