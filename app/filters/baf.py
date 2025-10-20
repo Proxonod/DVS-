@@ -101,16 +101,17 @@ def _baf_kernel_python(
         if not (0 <= x < width and 0 <= y < height):
             continue
         # per-pixel refractory
-        if t - last_times[y, x] < refractory_us:
+        last_val = float(last_times[y, x])
+        if t - last_val < refractory_us:
             # still update history to reflect activity
-            last_times[y, x] = t
+            last_times[y, x] = float(t)
             continue
         x0 = max(0, x - spatial_radius); y0 = max(0, y - spatial_radius)
         x1 = min(width - 1, x + spatial_radius); y1 = min(height - 1, y + spatial_radius)
         count = 0
         for yy in range(y0, y1 + 1):
             for xx in range(x0, x1 + 1):
-                if t - last_times[yy, xx] <= window_us:
+                if t - float(last_times[yy, xx]) <= window_us:
                     count += 1
                     if count >= count_threshold:
                         break
@@ -119,7 +120,7 @@ def _baf_kernel_python(
         if count >= count_threshold:
             mask[i] = True
         # Always update history
-        last_times[y, x] = t
+        last_times[y, x] = float(t)
     return mask
 
 
@@ -143,8 +144,9 @@ if njit is not None:
             x = int(xs[i]); y = int(ys[i]); t = int(ts[i])
             if not (0 <= x < width and 0 <= y < height):
                 continue
-            if t - last_times[y, x] < refractory_us:
-                last_times[y, x] = t
+            last_val = last_times[y, x]
+            if t - last_val < refractory_us:
+                last_times[y, x] = float(t)
                 continue
             x0 = 0 if x - spatial_radius < 0 else x - spatial_radius
             y0 = 0 if y - spatial_radius < 0 else y - spatial_radius
@@ -165,5 +167,5 @@ if njit is not None:
                 yy += 1
             if count >= count_threshold:
                 mask[i] = True
-            last_times[y, x] = t
+            last_times[y, x] = float(t)
         return mask
