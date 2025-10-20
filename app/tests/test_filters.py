@@ -89,6 +89,25 @@ def test_time_surface_decay_and_boost():
     assert np.isclose(filt.surface_pos[0, 0], 1.0, atol=1e-6)
 
 
+def test_time_surface_cuda_env(monkeypatch):
+    """Setting DVS_USE_CUDA enables GPU buffers when CuPy is available."""
+
+    monkeypatch.setenv("DVS_USE_CUDA", "1")
+    filt = TimeSurfaceFilter(tau_ms=5.0)
+    filt.reset(2, 2)
+    events = make_events(coords=[(0, 0)], times=[0], polarities=[1])
+    state: dict[str, object] = {}
+    filt.process(events, state)
+    # GPU buffers stay internal but exported overlays must always be NumPy arrays
+    assert isinstance(state["time_surface_pos"], np.ndarray)
+    assert isinstance(state["time_surface_neg"], np.ndarray)
+    if filt.device == "cuda":
+        # When running on CUDA, the internal arrays should be CuPy-backed
+        assert filt.surface_pos.__class__.__module__.startswith("cupy")
+    else:
+        assert filt.device == "cpu"
+
+
 def test_pipeline_render_colours():
     """Pipeline should colour events according to polarity."""
     pl = Pipeline()
