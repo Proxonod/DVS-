@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -329,6 +331,10 @@ class MainWindow(QMainWindow):
         self._events_dtype = None
         self._export_thread: Optional[QThread] = None
         self._export_worker: Optional[VideoExportWorker] = None
+        self._slice_queue: queue.Queue[Optional[np.ndarray]] | None = None
+        self._reader_thread: threading.Thread | None = None
+        self._reader_stop: threading.Event | None = None
+        self._reader_error: str | None = None
 
         # Central UI
         central = QWidget(self)
@@ -461,6 +467,7 @@ class MainWindow(QMainWindow):
         if not is_metavision_raw(path):
             QMessageBox.warning(self, "Unsupported", "Choose a .raw file.")
             return
+        self._stop_reader_worker()
         if self.reader:
             self.reader.close()
         self.reader = MetavisionReader.from_raw(path)
@@ -489,8 +496,12 @@ class MainWindow(QMainWindow):
         self.end_label.setText(f"{(self.duration_us or 0)/1000:.0f} ms" if self.duration_us else "unknown")
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}")
         self._update_hud()
+        self._start_reader_worker()
 
     def open_camera(self):
+        self._stop_reader_worker()
+        if self.reader:
+            self.reader.close()
         try:
             self.reader = MetavisionReader.from_camera()
         except Exception as e:
@@ -508,6 +519,7 @@ class MainWindow(QMainWindow):
         self._slice_accum = 0.0
         self._events_dtype = None
         self._update_hud()
+        self._start_reader_worker()
 
     # ---------- Filters & colors ----------
 
@@ -599,6 +611,90 @@ class MainWindow(QMainWindow):
         self._frame_interval_us = 1e6 / max(1, self.view_fps_cap)
         self.timer.start(interval_ms)
 
+    # ---------- Background streaming ----------
+
+    def _start_reader_worker(self) -> None:
+        if not self.reader:
+            return
+        self._stop_reader_worker()
+        self._slice_queue = queue.Queue(maxsize=512)
+        self._reader_stop = threading.Event()
+        self._reader_error = None
+
+        def _run() -> None:
+            reader = self.reader
+            if reader is None or self._slice_queue is None:
+                return
+            while self._reader_stop and not self._reader_stop.is_set():
+                try:
+                    events = next(reader)
+                except StopIteration:
+                    self._queue_put(None)
+                    break
+                except Exception as exc:  # pragma: no cover - rare runtime failure
+                    self._reader_error = str(exc)
+                    self._queue_put(None)
+                    break
+                if events is None:
+                    continue
+                self._queue_put(events)
+
+        self._reader_thread = threading.Thread(target=_run, name="EventSliceWorker", daemon=True)
+        self._reader_thread.start()
+
+    def _queue_put(self, item: Optional[np.ndarray]) -> None:
+        if self._slice_queue is None:
+            return
+        while True:
+            try:
+                self._slice_queue.put(item, timeout=0.05)
+                break
+            except queue.Full:
+                if self._reader_stop and self._reader_stop.is_set():
+                    try:
+                        self._slice_queue.put_nowait(item)
+                    except queue.Full:
+                        pass
+                    break
+
+    def _stop_reader_worker(self) -> None:
+        if self._reader_stop:
+            self._reader_stop.set()
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1.0)
+        self._reader_thread = None
+        self._reader_stop = None
+        if self._slice_queue is not None:
+            self._flush_slice_queue()
+        self._slice_queue = None
+
+    def _flush_slice_queue(self) -> None:
+        if self._slice_queue is None:
+            return
+        try:
+            while True:
+                self._slice_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    def _handle_stream_end(self) -> None:
+        if self._reader_error:
+            self.statusBar().showMessage(self._reader_error, 5000)
+            self._reader_error = None
+        if self._current_raw_path:
+            path = self._current_raw_path
+            self.open_file(path)
+            self.playing = True
+        else:
+            self._stop_reader_worker()
+            if self.reader:
+                try:
+                    self.reader.close()
+                except Exception:
+                    pass
+                self.reader = None
+            self.playing = False
+
     def _pause_while_scrubbing(self):
         self._scrub_was_playing = self.playing
         self.playing = False
@@ -632,18 +728,19 @@ class MainWindow(QMainWindow):
             slices_per_frame_float = (self._frame_interval_us / dt_us) * max(0.01, self.playback_speed)
             self._slice_accum += slices_per_frame_float
             n_slices = int(self._slice_accum)
+            processed_any = False
 
             if n_slices > 0:
                 self._slice_accum -= n_slices
                 for _ in range(n_slices):
+                    if self._slice_queue is None:
+                        break
                     try:
-                        ev = next(self.reader)
-                    except StopIteration:
-                        if self._current_raw_path:
-                            self.open_file(self._current_raw_path)
-                            self.playing = True
-                            break
-                        self.playing = False
+                        ev = self._slice_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if ev is None:
+                        self._handle_stream_end()
                         break
 
                     # Filters
@@ -670,10 +767,10 @@ class MainWindow(QMainWindow):
                     # Render
                     self._ensure_canvas()
                     self._composite_events(ev)
-            else:
-                # No new slice due yet: still decay for smoothness
-                if self.canvas is not None:
-                    self.canvas *= self.decay_per_frame
+                    processed_any = True
+
+            if not processed_any and self.canvas is not None:
+                self.canvas *= self.decay_per_frame
 
         if self.active_visual_filter is not None and (not self.playing or n_slices == 0):
             self._update_overlay_idle(self._frame_interval_us)
@@ -863,3 +960,12 @@ class MainWindow(QMainWindow):
     def _clear_export_refs(self) -> None:
         self._export_thread = None
         self._export_worker = None
+
+    def closeEvent(self, event):  # type: ignore[override]
+        self._stop_reader_worker()
+        if self.reader:
+            try:
+                self.reader.close()
+            except Exception:
+                pass
+        super().closeEvent(event)
