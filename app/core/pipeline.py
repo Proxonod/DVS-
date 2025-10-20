@@ -175,25 +175,46 @@ class Pipeline:
             raise RuntimeError(
                 "Pipeline dimensions are not set. Call reset() before rendering."
             )
-        # Start with a black frame
-        frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         events = state.get("events")
         if events is None or len(events) == 0:
-            return frame
-        # Draw positive events
-        pos_mask = events["p"] == 1
-        if np.any(pos_mask):
-            ys = events["y"][pos_mask].astype(np.int32)
-            xs = events["x"][pos_mask].astype(np.int32)
-            frame[ys, xs, 0] = self.pos_colour[0]
-            frame[ys, xs, 1] = self.pos_colour[1]
-            frame[ys, xs, 2] = self.pos_colour[2]
-        # Draw negative events
-        neg_mask = events["p"] == 0
-        if np.any(neg_mask):
-            ys = events["y"][neg_mask].astype(np.int32)
-            xs = events["x"][neg_mask].astype(np.int32)
-            frame[ys, xs, 0] = self.neg_colour[0]
-            frame[ys, xs, 1] = self.neg_colour[1]
-            frame[ys, xs, 2] = self.neg_colour[2]
-        return frame
+            return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+
+        xs = np.asarray(events["x"], dtype=np.intp)
+        ys = np.asarray(events["y"], dtype=np.intp)
+        ps = np.asarray(events["p"], dtype=np.uint8)
+
+        valid = (
+            (xs >= 0)
+            & (xs < self.width)
+            & (ys >= 0)
+            & (ys < self.height)
+        )
+        if not np.any(valid):
+            return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+
+        xs = xs[valid]
+        ys = ys[valid]
+        ps = ps[valid]
+
+        canvas = np.zeros((self.height, self.width, 3), dtype=np.uint16)
+        pos_colour = np.array(self.pos_colour, dtype=np.uint16)
+        neg_colour = np.array(self.neg_colour, dtype=np.uint16)
+
+        pos_idx = ps == 1
+        if np.any(pos_idx):
+            y_pos = ys[pos_idx]
+            x_pos = xs[pos_idx]
+            np.add.at(canvas[..., 0], (y_pos, x_pos), pos_colour[0])
+            np.add.at(canvas[..., 1], (y_pos, x_pos), pos_colour[1])
+            np.add.at(canvas[..., 2], (y_pos, x_pos), pos_colour[2])
+
+        neg_idx = ps == 0
+        if np.any(neg_idx):
+            y_neg = ys[neg_idx]
+            x_neg = xs[neg_idx]
+            np.add.at(canvas[..., 0], (y_neg, x_neg), neg_colour[0])
+            np.add.at(canvas[..., 1], (y_neg, x_neg), neg_colour[1])
+            np.add.at(canvas[..., 2], (y_neg, x_neg), neg_colour[2])
+
+        np.clip(canvas, 0, 255, out=canvas)
+        return canvas.astype(np.uint8)

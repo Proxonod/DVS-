@@ -36,7 +36,7 @@ class TimeSurfaceFilter(BaseFilter):
         self.polarity_separate = bool(polarity_separate)
         self.surface_pos: np.ndarray
         self.surface_neg: np.ndarray
-        self.last_timestamp: float = 0.0
+        self.last_timestamp: float | None = None
         self.width = 0
         self.height = 0
 
@@ -55,7 +55,7 @@ class TimeSurfaceFilter(BaseFilter):
         # Allocate surfaces; use float32 for efficiency
         self.surface_pos = np.zeros((height, width), dtype=np.float32)
         self.surface_neg = np.zeros((height, width), dtype=np.float32)
-        self.last_timestamp = 0.0
+        self.last_timestamp = None
 
     def process(self, events: np.ndarray, state: Dict[str, object]) -> Dict[str, object]:
         if events.size == 0:
@@ -63,7 +63,7 @@ class TimeSurfaceFilter(BaseFilter):
             return {}
         # Determine time difference since last update
         current_time = float(events["t"][-1])  # use last event timestamp
-        if self.last_timestamp == 0.0:
+        if self.last_timestamp is None:
             dt = 0.0
         else:
             dt = current_time - self.last_timestamp
