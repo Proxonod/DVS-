@@ -1,11 +1,18 @@
 """Filter panel UI."""
 
 from __future__ import annotations
-from typing import Callable
+from typing import Callable, Iterable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QSpinBox, QGroupBox
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QCheckBox,
+    QSpinBox,
+    QGroupBox,
+    QComboBox,
 )
 
 
@@ -18,6 +25,9 @@ class FilterPanel(QWidget):
         on_change_baf: Callable[[int, int, int, int], None],
         on_toggle_refractory: Callable[[bool], None],
         on_change_refractory: Callable[[int], None],
+        on_select_visual: Callable[[str | None], None],
+        on_change_visual_params: Callable[[dict], None],
+        visual_filters: Iterable[str] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -96,4 +106,45 @@ class FilterPanel(QWidget):
         vb2.addLayout(hb5)
 
         root.addWidget(gb_ref)
+
+        # Visualisation group
+        gb_vis = QGroupBox("Visualisierung")
+        vb3 = QVBoxLayout(gb_vis)
+        hb6 = QHBoxLayout()
+        hb6.addWidget(QLabel("Filter"))
+        self.cmb_visual = QComboBox()
+        self.cmb_visual.addItem("Ohne Filter", userData=None)
+        self._visual_filters = list(visual_filters or [])
+        for name in self._visual_filters:
+            self.cmb_visual.addItem(name, userData=name)
+        hb6.addWidget(self.cmb_visual)
+        vb3.addLayout(hb6)
+
+        hb7 = QHBoxLayout()
+        self.lbl_event_count = QLabel("Integration (ms)")
+        self.sp_event_count = QSpinBox()
+        self.sp_event_count.setRange(1, 5000)
+        self.sp_event_count.setValue(50)
+        hb7.addWidget(self.lbl_event_count)
+        hb7.addWidget(self.sp_event_count)
+        vb3.addLayout(hb7)
+
+        self.lbl_event_count.setVisible(False)
+        self.sp_event_count.setVisible(False)
+
+        def _on_visual_changed(index: int) -> None:
+            name = self.cmb_visual.itemData(index)
+            on_select_visual(name)
+            show_event_count = name == "Event Count Image"
+            self.lbl_event_count.setVisible(show_event_count)
+            self.sp_event_count.setVisible(show_event_count)
+            if show_event_count:
+                on_change_visual_params({"integration_ms": self.sp_event_count.value()})
+
+        self.cmb_visual.currentIndexChanged.connect(_on_visual_changed)
+        self.sp_event_count.valueChanged.connect(
+            lambda val: on_change_visual_params({"integration_ms": val})
+        )
+
+        root.addWidget(gb_vis)
         root.addStretch(1)
