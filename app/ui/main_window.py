@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QObject, QThread, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap, QColor
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -40,6 +40,171 @@ from .filter_panel import FilterPanel
 class ViewColors:
     pos: tuple[int, int, int] = (0, 255, 170)
     neg: tuple[int, int, int] = (255, 51, 102)
+
+
+class VideoExportWorker(QObject):
+    """Background worker that renders a RAW stream to a video file."""
+
+    finished = Signal(str)
+    error = Signal(str)
+
+    def __init__(
+        self,
+        raw_path: str,
+        out_path: str,
+        codec: str,
+        width: int,
+        height: int,
+        fps: float,
+        decay: float,
+        pos_colour: tuple[int, int, int],
+        neg_colour: tuple[int, int, int],
+        enable_baf: bool,
+        baf_params: dict,
+        enable_refractory: bool,
+        refractory_params: dict,
+    ) -> None:
+        super().__init__()
+        self.raw_path = raw_path
+        self.out_path = out_path
+        self.codec = codec
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = max(1.0, float(fps))
+        self.decay = float(decay)
+        self.pos_colour = np.array(pos_colour, dtype=np.float32) / 255.0
+        self.neg_colour = np.array(neg_colour, dtype=np.float32) / 255.0
+        self.enable_baf = enable_baf
+        self.baf_params = dict(baf_params)
+        self.enable_refractory = enable_refractory
+        self.refractory_params = dict(refractory_params)
+
+    def _composite_frame(self, canvas: np.ndarray, events: np.ndarray) -> None:
+        canvas *= self.decay
+        if events is None or events.size == 0:
+            return
+
+        xs = events["x"].astype(int, copy=False)
+        ys = events["y"].astype(int, copy=False)
+        ps = events["p"].astype(int, copy=False)
+
+        h, w, _ = canvas.shape
+        xs = np.clip(xs, 0, w - 1)
+        ys = np.clip(ys, 0, h - 1)
+
+        if np.any(ps == 1):
+            idx = (ys[ps == 1], xs[ps == 1])
+            canvas[idx] = np.minimum(1.0, canvas[idx] + self.pos_colour)
+        if np.any(ps == 0):
+            idx = (ys[ps == 0], xs[ps == 0])
+            canvas[idx] = np.minimum(1.0, canvas[idx] + self.neg_colour)
+
+    def _write_frame(self, writer, canvas: np.ndarray) -> None:
+        rgb8 = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
+        writer.write(rgb8[..., ::-1])
+
+    def run(self) -> None:
+        try:
+            import cv2
+        except Exception as exc:  # pragma: no cover - OpenCV optional in tests
+            self.error.emit(f"OpenCV VideoWriter not available: {exc}")
+            return
+
+        try:
+            reader = MetavisionReader.from_raw(self.raw_path)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            return
+
+        meta = reader.metadata
+        width = meta.width or self.width
+        height = meta.height or self.height
+        if not width or not height:
+            reader.close()
+            self.error.emit("Cannot determine sensor dimensions for export.")
+            return
+
+        frame_size = (int(width), int(height))
+        fourcc = cv2.VideoWriter_fourcc(*("FFV1" if self.codec == "ffv1" else "mp4v"))
+        writer = cv2.VideoWriter(self.out_path, fourcc, self.fps, frame_size)
+        if not writer.isOpened():
+            reader.close()
+            self.error.emit(f"Unable to open video writer for {self.out_path}")
+            return
+
+        baf = None
+        refractory = None
+        if self.enable_baf:
+            baf = BackgroundActivityFilter()
+            try:
+                baf.set_params(**self.baf_params)
+            except Exception:
+                pass
+            baf.reset(frame_size[0], frame_size[1])
+        if self.enable_refractory:
+            refractory = RefractoryFilter()
+            try:
+                refractory.set_params(**self.refractory_params)
+            except Exception:
+                pass
+            refractory.reset(frame_size[0], frame_size[1])
+
+        frame_interval_us = int(1e6 / self.fps)
+        canvas = np.zeros((frame_size[1], frame_size[0], 3), np.float32)
+        buffers: list[np.ndarray] = []
+        empty_events: Optional[np.ndarray] = None
+        last_frame_time: int | None = None
+
+        try:
+            for events in reader:
+                if empty_events is None:
+                    empty_events = np.empty(0, dtype=events.dtype)
+                if events.size == 0:
+                    continue
+
+                if refractory is not None:
+                    state: dict[str, object] = {}
+                    events = refractory.process(events, state).get("events", events)
+                if baf is not None:
+                    state = {}
+                    events = baf.process(events, state).get("events", events)
+
+                buffers.append(events)
+                slice_end = int(events["t"][-1])
+                if last_frame_time is None:
+                    last_frame_time = slice_end - frame_interval_us
+
+                while last_frame_time is not None and slice_end - last_frame_time >= frame_interval_us:
+                    cutoff = last_frame_time + frame_interval_us
+                    if buffers:
+                        combined = buffers[0] if len(buffers) == 1 else np.concatenate(buffers)
+                    else:
+                        combined = empty_events if empty_events is not None else np.empty(0, dtype=events.dtype)
+                    if combined.size > 0:
+                        frame_mask = combined["t"] < cutoff
+                        frame_events = combined[frame_mask]
+                        remaining = combined[~frame_mask]
+                        buffers = [remaining] if remaining.size > 0 else []
+                    else:
+                        frame_events = combined
+                        buffers = []
+                    self._composite_frame(canvas, frame_events)
+                    self._write_frame(writer, canvas)
+                    last_frame_time = cutoff
+
+            if buffers:
+                combined = buffers[0] if len(buffers) == 1 else np.concatenate(buffers)
+                self._composite_frame(canvas, combined)
+                self._write_frame(writer, canvas)
+        except Exception as exc:
+            self.error.emit(str(exc))
+            writer.release()
+            reader.close()
+            return
+
+        writer.release()
+        reader.close()
+        self.finished.emit(self.out_path)
 
 
 class MainWindow(QMainWindow):
@@ -72,6 +237,8 @@ class MainWindow(QMainWindow):
         self.filter_refractory = RefractoryFilter()
         self.enable_baf = False
         self.enable_refractory = False
+        self._export_thread: Optional[QThread] = None
+        self._export_worker: Optional[VideoExportWorker] = None
 
         # Central UI
         central = QWidget(self)
@@ -157,6 +324,11 @@ class MainWindow(QMainWindow):
         act_colors = QAction("Colours", self)
         act_colors.triggered.connect(self._open_color_dialog)
         tb.addAction(act_colors)
+
+        tb.addSeparator()
+        act_export = QAction(self.style().standardIcon(QStyle.SP_DialogSaveButton), "Export Video", self)
+        act_export.triggered.connect(self.export_video_dialog)
+        tb.addAction(act_export)
 
     def _build_filter_dock(self):
         dock = QDockWidget("Filters", self)
@@ -416,3 +588,81 @@ class MainWindow(QMainWindow):
 
     def _toggle_fullscreen(self):
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
+
+    # ---------- Export ----------
+
+    def export_video_dialog(self):
+        if self._export_thread and self._export_thread.isRunning():
+            QMessageBox.information(self, "Export", "A video export is already in progress.")
+            return
+        if not self._current_raw_path:
+            QMessageBox.information(self, "Export", "Load a RAW file before exporting.")
+            return
+
+        base = Path(self._current_raw_path).with_suffix("")
+        default_path = str(base.with_suffix(".mp4"))
+        filters = "MP4 Video (*.mp4);;Lossless FFV1 (*.mkv)"
+        out_path, selected_filter = QFileDialog.getSaveFileName(self, "Export Video", default_path, filters)
+        if not out_path:
+            return
+
+        out_path = str(out_path)
+        sel = (selected_filter or "").lower()
+        if out_path.lower().endswith(".mkv") or "ffv1" in sel:
+            codec = "ffv1"
+            if not out_path.lower().endswith(".mkv"):
+                out_path += ".mkv"
+        else:
+            codec = "mp4"
+            if not out_path.lower().endswith(".mp4"):
+                out_path += ".mp4"
+
+        self._start_video_export(out_path, codec)
+
+    def _start_video_export(self, out_path: str, codec: str) -> None:
+        if not self._current_raw_path:
+            return
+
+        worker = VideoExportWorker(
+            raw_path=self._current_raw_path,
+            out_path=out_path,
+            codec=codec,
+            width=self.meta_width,
+            height=self.meta_height,
+            fps=self.view_fps_cap,
+            decay=self.decay_per_frame,
+            pos_colour=self.colors.pos,
+            neg_colour=self.colors.neg,
+            enable_baf=self.enable_baf,
+            baf_params=self.filter_baf.params(),
+            enable_refractory=self.enable_refractory,
+            refractory_params=self.filter_refractory.params(),
+        )
+
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_export_finished)
+        worker.error.connect(self._on_export_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_export_refs)
+        thread.start()
+
+        self._export_thread = thread
+        self._export_worker = worker
+        self.statusBar().showMessage(f"Exporting to {out_path}…")
+
+    def _on_export_finished(self, out_path: str) -> None:
+        self.statusBar().showMessage(f"Export complete: {os.path.basename(out_path)}", 5000)
+        QMessageBox.information(self, "Export complete", f"Video saved to:\n{out_path}")
+
+    def _on_export_error(self, message: str) -> None:
+        self.statusBar().showMessage("Export failed", 5000)
+        QMessageBox.critical(self, "Export failed", message)
+
+    def _clear_export_refs(self) -> None:
+        self._export_thread = None
+        self._export_worker = None
