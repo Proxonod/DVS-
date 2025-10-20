@@ -1,26 +1,8 @@
-"""Background Activity Filter (BAF).
-
-This filter suppresses isolated events by requiring a minimum number
-of neighbouring events within a temporal window.  It maintains a
-per-pixel array of timestamps indicating the last accepted event at
-each pixel.  When processing a new event slice, the filter computes
-the minimum last timestamp over a small spatial neighbourhood around
-each event.  If the difference between the event timestamp and this
-minimum is less than or equal to ``window_ms``, the event is accepted;
-otherwise it is discarded.
-
-The default parameters favour a longer temporal window (50 ms) and a
-threshold of 1 neighbour, which yields stronger noise suppression.
-Each event updates the timestamp history, regardless of whether it is
-kept, ensuring the neighbourhood state reflects all recent activity.
-"""
+"""Background Activity Filter (BAF)."""
 
 from __future__ import annotations
-
 from typing import Dict
-
 import numpy as np
-
 from .base import BaseFilter
 
 try:
@@ -41,7 +23,6 @@ class BackgroundActivityFilter(BaseFilter):
         refractory_us: int = 500,
         spatial_radius: int = 1,
     ) -> None:
-        """Initialise the filter with sensible defaults."""
         self.window_us = int(window_ms * 1000)
         self.count_threshold = max(1, int(count_threshold))
         self.refractory_us = int(refractory_us)
@@ -101,8 +82,6 @@ class BackgroundActivityFilter(BaseFilter):
         return {"events": events[mask]}
 
 
-# --- Helpers ---
-
 def _baf_kernel_python(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -113,21 +92,20 @@ def _baf_kernel_python(
     count_threshold: int,
     spatial_radius: int,
 ) -> np.ndarray:
-    """Pure Python implementation of the BAF."""
     n = len(ts)
     mask = np.zeros(n, dtype=bool)
     height, width = last_times.shape
     for i in range(n):
-        x = int(xs[i])
-        y = int(ys[i])
-        t = int(ts[i])
-        # Refractory: skip if same pixel fired too recently
-        if t - last_times[y, x] < refractory_us:
+        x = int(xs[i]); y = int(ys[i]); t = int(ts[i])
+        if not (0 <= x < width and 0 <= y < height):
             continue
-        x0 = max(0, x - spatial_radius)
-        y0 = max(0, y - spatial_radius)
-        x1 = min(width - 1, x + spatial_radius)
-        y1 = min(height - 1, y + spatial_radius)
+        # per-pixel refractory
+        if t - last_times[y, x] < refractory_us:
+            # still update history to reflect activity
+            last_times[y, x] = t
+            continue
+        x0 = max(0, x - spatial_radius); y0 = max(0, y - spatial_radius)
+        x1 = min(width - 1, x + spatial_radius); y1 = min(height - 1, y + spatial_radius)
         count = 0
         for yy in range(y0, y1 + 1):
             for xx in range(x0, x1 + 1):
@@ -139,7 +117,7 @@ def _baf_kernel_python(
                 break
         if count >= count_threshold:
             mask[i] = True
-        # Update history unconditionally
+        # Always update history
         last_times[y, x] = t
     return mask
 
@@ -157,15 +135,15 @@ if njit is not None:
         count_threshold: int,
         spatial_radius: int,
     ) -> np.ndarray:
-        """Numba‑accelerated version of the BAF."""
         n = ts.shape[0]
         mask = np.zeros(n, dtype=np.bool_)
         height, width = last_times.shape
         for i in range(n):
-            x = int(xs[i])
-            y = int(ys[i])
-            t = int(ts[i])
+            x = int(xs[i]); y = int(ys[i]); t = int(ts[i])
+            if not (0 <= x < width and 0 <= y < height):
+                continue
             if t - last_times[y, x] < refractory_us:
+                last_times[y, x] = t
                 continue
             x0 = 0 if x - spatial_radius < 0 else x - spatial_radius
             y0 = 0 if y - spatial_radius < 0 else y - spatial_radius
@@ -186,6 +164,5 @@ if njit is not None:
                 yy += 1
             if count >= count_threshold:
                 mask[i] = True
-            # Update history unconditionally
             last_times[y, x] = t
         return mask

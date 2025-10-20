@@ -1,8 +1,6 @@
 # app/ui/main_window.py
-# GUI with toolbar, RAW/camera open, play/pause, speed, view-FPS cap,
-# timeline, color settings, and live filters. Fixes:
-# - dynamic resize of canvas to true sensor size (no top-left cropping)
-# - duration estimation when SDK does not provide it
+# GUI with toolbar, RAW/camera open, play/pause, speed control with slice accumulator,
+# view FPS cap, timeline, color settings, live filters, canvas grow, and duration estimation.
 
 from __future__ import annotations
 
@@ -65,6 +63,10 @@ class MainWindow(QMainWindow):
         self.decay_per_frame = 0.90
         self.canvas: Optional[np.ndarray] = None
 
+        # Speed control via slice accumulator
+        self._slice_accum: float = 0.0
+        self._frame_interval_us: float = 1e6 / max(1, self.view_fps_cap)
+
         # Filters
         self.filter_baf = BackgroundActivityFilter()
         self.filter_refractory = RefractoryFilter()
@@ -83,7 +85,7 @@ class MainWindow(QMainWindow):
         self.view = QLabel()
         self.view.setAlignment(Qt.AlignCenter)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.view.setScaledContents(True)  # crucial to show full frame without cropping
+        self.view.setScaledContents(True)  # show full image without cropping
         vbox.addWidget(self.view, 1)
 
         tl = QHBoxLayout()
@@ -93,7 +95,7 @@ class MainWindow(QMainWindow):
         self.time_slider.sliderReleased.connect(self._seek_released)
         tl.addWidget(QLabel("0 ms"))
         tl.addWidget(self.time_slider, 1)
-        self.end_label = QLabel("…")
+        self.end_label = QLabel("unknown")
         tl.addWidget(self.end_label)
         vbox.addLayout(tl)
 
@@ -112,7 +114,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Error", str(e))
 
-    # ---------- UI building ----------
+    # ---------- UI ----------
 
     def _build_toolbar(self):
         tb = QToolBar("Main", self)
@@ -201,7 +203,6 @@ class MainWindow(QMainWindow):
         self.duration_us = meta.duration_us
         self._current_raw_path = path
 
-        # If SDK did not provide duration, try to estimate once
         if not self.duration_us:
             try:
                 dur = self.reader.estimate_duration_us(delta_t_us=100000)
@@ -215,6 +216,7 @@ class MainWindow(QMainWindow):
         self.filter_refractory.reset(self.meta_width, self.meta_height)
         self.playing = False
         self.current_time_us = 0
+        self._slice_accum = 0.0  # reset speed accumulator
         self.end_label.setText(f"{(self.duration_us or 0)/1000:.0f} ms" if self.duration_us else "unknown")
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}")
         self._update_hud()
@@ -233,6 +235,7 @@ class MainWindow(QMainWindow):
         self.filter_baf.reset(self.meta_width, self.meta_height)
         self.filter_refractory.reset(self.meta_width, self.meta_height)
         self.playing = True
+        self._slice_accum = 0.0
         self._update_hud()
 
     # ---------- Filters & colors ----------
@@ -254,12 +257,29 @@ class MainWindow(QMainWindow):
         self.playing = not self.playing
         self._update_hud()
 
-    def _on_speed_changed(self, txt): self.playback_speed = float(txt.replace("x", ""))
-    def _set_speed_value(self, v): self.playback_speed = v; self.speed_combo.setCurrentText(f"{v:g}x"); self._update_hud()
-    def _on_fps_changed(self, txt): self.view_fps_cap = int(txt); self._apply_view_fps_cap()
-    def _apply_view_fps_cap(self): self.timer.start(max(1, int(1000 / max(1, self.view_fps_cap))))
+    def _on_speed_changed(self, txt):
+        self.playback_speed = float(txt.replace("x", ""))
+        self._slice_accum = 0.0  # optional reset for immediate response
 
-    def _pause_while_scrubbing(self): self._scrub_was_playing = self.playing; self.playing = False
+    def _set_speed_value(self, v):
+        self.playback_speed = v
+        self.speed_combo.setCurrentText(f"{v:g}x")
+        self._slice_accum = 0.0
+        self._update_hud()
+
+    def _on_fps_changed(self, txt):
+        self.view_fps_cap = int(txt)
+        self._apply_view_fps_cap()
+
+    def _apply_view_fps_cap(self):
+        interval_ms = max(1, int(1000 / max(1, self.view_fps_cap)))
+        self._frame_interval_us = 1e6 / max(1, self.view_fps_cap)
+        self.timer.start(interval_ms)
+
+    def _pause_while_scrubbing(self):
+        self._scrub_was_playing = self.playing
+        self.playing = False
+
     def _seek_released(self):
         if self.duration_us:
             pos = self.time_slider.value() / 1000.0
@@ -281,24 +301,43 @@ class MainWindow(QMainWindow):
         if not self.reader:
             self.view.setText("No source loaded.")
             return
+
         if self.playing:
-            try: events = next(self.reader)
-            except StopIteration:
-                if self._current_raw_path:
-                    self.open_file(self._current_raw_path); self.playing = True; return
-                self.playing = False; return
+            # How many slices should we consume this frame?
+            dt_us = getattr(self.reader, "delta_t_us", 5000) or 5000
+            slices_per_frame_float = (self._frame_interval_us / dt_us) * max(0.01, self.playback_speed)
+            self._slice_accum += slices_per_frame_float
+            n_slices = int(self._slice_accum)
 
-            # Filters
-            frame_state = {}
-            ev = events
-            if self.enable_refractory: ev = self.filter_refractory.process(ev, frame_state).get("events", ev)
-            if self.enable_baf: ev = self.filter_baf.process(ev, frame_state).get("events", ev)
+            if n_slices > 0:
+                self._slice_accum -= n_slices
+                for _ in range(n_slices):
+                    try:
+                        ev = next(self.reader)
+                    except StopIteration:
+                        if self._current_raw_path:
+                            self.open_file(self._current_raw_path)
+                            self.playing = True
+                            break
+                        self.playing = False
+                        break
 
-            # Render
-            self._ensure_canvas()
-            self._composite_events(ev)
+                    # Filters
+                    frame_state = {}
+                    if self.enable_refractory:
+                        ev = self.filter_refractory.process(ev, frame_state).get("events", ev)
+                    if self.enable_baf:
+                        ev = self.filter_baf.process(ev, frame_state).get("events", ev)
 
-        # Show frame
+                    # Render
+                    self._ensure_canvas()
+                    self._composite_events(ev)
+            else:
+                # No new slice due yet: still decay for smoothness
+                if self.canvas is not None:
+                    self.canvas *= self.decay_per_frame
+
+        # Present
         if self.canvas is not None:
             rgb8 = np.clip(self.canvas * 255.0, 0, 255).astype(np.uint8)
             h, w, _ = rgb8.shape
@@ -314,7 +353,6 @@ class MainWindow(QMainWindow):
             self.canvas = np.zeros((self.meta_height, self.meta_width, 3), np.float32)
 
     def _grow_canvas_if_needed(self, xs: np.ndarray, ys: np.ndarray):
-        """If event coordinates exceed current size, grow canvas and reset filters."""
         max_x = int(xs.max()) + 1 if xs.size else self.meta_width
         max_y = int(ys.max()) + 1 if ys.size else self.meta_height
         need_w = max_x > self.meta_width
@@ -337,10 +375,9 @@ class MainWindow(QMainWindow):
         ys = ev["y"].astype(int, copy=False)
         ps = ev["p"].astype(int, copy=False)
 
-        # Dynamic resize if SDK did not give correct sensor size
+        # Dynamic resize if needed
         self._grow_canvas_if_needed(xs, ys)
 
-        # Safe clipping after possible grow
         xs = np.clip(xs, 0, self.meta_width - 1)
         ys = np.clip(ys, 0, self.meta_height - 1)
 
