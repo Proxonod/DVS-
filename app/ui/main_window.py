@@ -56,6 +56,7 @@ class VideoExportWorker(QObject):
         width: int,
         height: int,
         fps: float,
+        playback_speed: float,
         decay: float,
         pos_colour: tuple[int, int, int],
         neg_colour: tuple[int, int, int],
@@ -71,6 +72,7 @@ class VideoExportWorker(QObject):
         self.width = int(width)
         self.height = int(height)
         self.fps = max(1.0, float(fps))
+        self.playback_speed = max(0.01, float(playback_speed))
         self.decay = float(decay)
         self.pos_colour = np.array(pos_colour, dtype=np.float32) / 255.0
         self.neg_colour = np.array(neg_colour, dtype=np.float32) / 255.0
@@ -149,11 +151,12 @@ class VideoExportWorker(QObject):
                 pass
             refractory.reset(frame_size[0], frame_size[1])
 
-        frame_interval_us = int(1e6 / self.fps)
+        frame_interval_us = 1e6 / self.fps
+        effective_interval_us = frame_interval_us * self.playback_speed
         canvas = np.zeros((frame_size[1], frame_size[0], 3), np.float32)
         buffers: list[np.ndarray] = []
         empty_events: Optional[np.ndarray] = None
-        last_frame_time: int | None = None
+        last_frame_time: float | None = None
 
         try:
             for events in reader:
@@ -170,12 +173,12 @@ class VideoExportWorker(QObject):
                     events = baf.process(events, state).get("events", events)
 
                 buffers.append(events)
-                slice_end = int(events["t"][-1])
+                slice_end = float(events["t"][-1])
                 if last_frame_time is None:
-                    last_frame_time = slice_end - frame_interval_us
+                    last_frame_time = slice_end - effective_interval_us
 
-                while last_frame_time is not None and slice_end - last_frame_time >= frame_interval_us:
-                    cutoff = last_frame_time + frame_interval_us
+                while last_frame_time is not None and slice_end - last_frame_time >= effective_interval_us:
+                    cutoff = last_frame_time + effective_interval_us
                     if buffers:
                         combined = buffers[0] if len(buffers) == 1 else np.concatenate(buffers)
                     else:
@@ -630,6 +633,7 @@ class MainWindow(QMainWindow):
             width=self.meta_width,
             height=self.meta_height,
             fps=self.view_fps_cap,
+            playback_speed=self.playback_speed,
             decay=self.decay_per_frame,
             pos_colour=self.colors.pos,
             neg_colour=self.colors.neg,
