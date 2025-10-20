@@ -52,7 +52,8 @@ class BackgroundActivityFilter(BaseFilter):
     def reset(self, width: int, height: int) -> None:
         self.width = width
         self.height = height
-        self.last_times = np.full((height, width), -np.iinfo(np.int64).max, dtype=np.int64)
+        safe_neg = -int(max(self.window_us, self.refractory_us) + 1)
+        self.last_times = np.full((height, width), safe_neg, dtype=np.int64)
 
     def process(self, events: np.ndarray, state: Dict[str, object]) -> Dict[str, object]:
         if events.size == 0:

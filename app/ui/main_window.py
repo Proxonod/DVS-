@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
 from ..io.metavision_reader import MetavisionReader, is_metavision_raw
 from ..filters.baf import BackgroundActivityFilter
 from ..filters.refractory import RefractoryFilter
+from ..filters.visual_registry import create_visual_filter, list_visual_filters
+from ..core.visualization import compose_frame
 from .filter_panel import FilterPanel
 
 
@@ -64,6 +66,8 @@ class VideoExportWorker(QObject):
         baf_params: dict,
         enable_refractory: bool,
         refractory_params: dict,
+        visual_filter_name: str | None,
+        visual_filter_params: dict,
     ) -> None:
         super().__init__()
         self.raw_path = raw_path
@@ -76,15 +80,24 @@ class VideoExportWorker(QObject):
         self.decay = float(decay)
         self.pos_colour = np.array(pos_colour, dtype=np.float32) / 255.0
         self.neg_colour = np.array(neg_colour, dtype=np.float32) / 255.0
+        self.pos_colour_tuple = tuple(int(v) for v in pos_colour)
+        self.neg_colour_tuple = tuple(int(v) for v in neg_colour)
         self.enable_baf = enable_baf
         self.baf_params = dict(baf_params)
         self.enable_refractory = enable_refractory
         self.refractory_params = dict(refractory_params)
+        self.visual_filter_name = visual_filter_name
+        self.visual_filter_params = dict(visual_filter_params)
 
-    def _composite_frame(self, canvas: np.ndarray, events: np.ndarray) -> None:
+    def _composite_frame(
+        self,
+        canvas: np.ndarray,
+        events: np.ndarray,
+        overlay_state: dict[str, object] | None,
+    ) -> np.ndarray:
         canvas *= self.decay
         if events is None or events.size == 0:
-            return
+            return compose_frame(canvas, self.pos_colour_tuple, self.neg_colour_tuple, overlay_state)
 
         xs = events["x"].astype(int, copy=False)
         ys = events["y"].astype(int, copy=False)
@@ -100,9 +113,13 @@ class VideoExportWorker(QObject):
         if np.any(ps == 0):
             idx = (ys[ps == 0], xs[ps == 0])
             canvas[idx] = np.minimum(1.0, canvas[idx] + self.neg_colour)
+        return compose_frame(canvas, self.pos_colour_tuple, self.neg_colour_tuple, overlay_state)
 
-    def _write_frame(self, writer, canvas: np.ndarray) -> None:
-        rgb8 = np.clip(canvas * 255.0, 0, 255).astype(np.uint8)
+    def _write_frame(self, writer, frame: np.ndarray) -> None:
+        if frame.dtype != np.uint8:
+            rgb8 = np.clip(frame, 0, 255).astype(np.uint8)
+        else:
+            rgb8 = frame
         writer.write(rgb8[..., ::-1])
 
     def run(self) -> None:
@@ -157,6 +174,20 @@ class VideoExportWorker(QObject):
         buffers: list[np.ndarray] = []
         empty_events: Optional[np.ndarray] = None
         last_frame_time: float | None = None
+        visual_filter = None
+
+        if self.visual_filter_name:
+            try:
+                visual_filter = create_visual_filter(self.visual_filter_name)
+                visual_filter.reset(frame_size[0], frame_size[1])
+                params = dict(self.visual_filter_params)
+                params.update({
+                    "pos_colour": self.pos_colour_tuple,
+                    "neg_colour": self.neg_colour_tuple,
+                })
+                visual_filter.set_params(**params)
+            except Exception:
+                visual_filter = None
 
         try:
             for events in reader:
@@ -191,14 +222,36 @@ class VideoExportWorker(QObject):
                     else:
                         frame_events = combined
                         buffers = []
-                    self._composite_frame(canvas, frame_events)
-                    self._write_frame(writer, canvas)
+                    overlay_state: dict[str, object] | None
+                    if visual_filter is not None:
+                        vis_state: dict[str, object] = {"dt_hint_us": effective_interval_us}
+                        try:
+                            result = visual_filter.process(frame_events, vis_state)
+                            if isinstance(result, dict):
+                                vis_state.update(result)
+                            overlay_state = vis_state
+                        except Exception:
+                            overlay_state = {}
+                    else:
+                        overlay_state = None
+                    frame = self._composite_frame(canvas, frame_events, overlay_state)
+                    self._write_frame(writer, frame)
                     last_frame_time = cutoff
 
             if buffers:
                 combined = buffers[0] if len(buffers) == 1 else np.concatenate(buffers)
-                self._composite_frame(canvas, combined)
-                self._write_frame(writer, canvas)
+                overlay_state = None
+                if visual_filter is not None:
+                    vis_state = {"dt_hint_us": effective_interval_us}
+                    try:
+                        result = visual_filter.process(combined, vis_state)
+                        if isinstance(result, dict):
+                            vis_state.update(result)
+                        overlay_state = vis_state
+                    except Exception:
+                        overlay_state = {}
+                frame = self._composite_frame(canvas, combined, overlay_state)
+                self._write_frame(writer, frame)
         except Exception as exc:
             self.error.emit(str(exc))
             writer.release()
@@ -240,6 +293,11 @@ class MainWindow(QMainWindow):
         self.filter_refractory = RefractoryFilter()
         self.enable_baf = False
         self.enable_refractory = False
+        self.visual_filter_name: str | None = None
+        self.visual_param_store: dict[str, dict[str, object]] = {}
+        self.active_visual_filter = None
+        self._overlay_state: dict[str, object] | None = None
+        self._events_dtype = None
         self._export_thread: Optional[QThread] = None
         self._export_worker: Optional[VideoExportWorker] = None
 
@@ -340,6 +398,9 @@ class MainWindow(QMainWindow):
             on_change_baf=self._on_change_baf,
             on_toggle_refractory=self._on_toggle_refractory,
             on_change_refractory=self._on_change_refractory,
+            on_select_visual=self._on_visual_filter_selected,
+            on_change_visual_params=self._on_visual_param_changed,
+            visual_filters=list_visual_filters(),
             parent=dock,
         )
         dock.setWidget(panel)
@@ -389,9 +450,11 @@ class MainWindow(QMainWindow):
         self._ensure_canvas()
         self.filter_baf.reset(self.meta_width, self.meta_height)
         self.filter_refractory.reset(self.meta_width, self.meta_height)
+        self._reset_visual_filter()
         self.playing = False
         self.current_time_us = 0
         self._slice_accum = 0.0  # reset speed accumulator
+        self._events_dtype = None
         self.end_label.setText(f"{(self.duration_us or 0)/1000:.0f} ms" if self.duration_us else "unknown")
         self.statusBar().showMessage(f"Loaded {os.path.basename(path)}")
         self._update_hud()
@@ -409,8 +472,10 @@ class MainWindow(QMainWindow):
         self.duration_us = None
         self.filter_baf.reset(self.meta_width, self.meta_height)
         self.filter_refractory.reset(self.meta_width, self.meta_height)
+        self._reset_visual_filter()
         self.playing = True
         self._slice_accum = 0.0
+        self._events_dtype = None
         self._update_hud()
 
     # ---------- Filters & colors ----------
@@ -420,11 +485,58 @@ class MainWindow(QMainWindow):
     def _on_toggle_refractory(self, en: bool): self.enable_refractory = en
     def _on_change_refractory(self, r): self.filter_refractory.set_params(refractory_us=r)
 
+    def _on_visual_filter_selected(self, name: str | None) -> None:
+        self._set_visual_filter(name)
+
+    def _on_visual_param_changed(self, params: dict) -> None:
+        if not self.visual_filter_name:
+            return
+        store = self.visual_param_store.setdefault(self.visual_filter_name, {})
+        store.update(params)
+        self._apply_visual_params()
+
+    def _set_visual_filter(self, name: str | None) -> None:
+        self.visual_filter_name = name
+        self._overlay_state = None
+        self.active_visual_filter = None
+        if not name:
+            return
+        try:
+            filt = create_visual_filter(name)
+        except Exception:
+            return
+        self.active_visual_filter = filt
+        if self.meta_width and self.meta_height:
+            try:
+                filt.reset(self.meta_width, self.meta_height)
+            except Exception:
+                pass
+        self._apply_visual_params()
+
+    def _apply_visual_params(self) -> None:
+        if not self.active_visual_filter or not self.visual_filter_name:
+            return
+        params = dict(self.visual_param_store.get(self.visual_filter_name, {}))
+        params.update({"pos_colour": self.colors.pos, "neg_colour": self.colors.neg})
+        try:
+            self.active_visual_filter.set_params(**params)
+        except Exception:
+            pass
+
+    def _reset_visual_filter(self) -> None:
+        if not self.active_visual_filter:
+            return
+        try:
+            self.active_visual_filter.reset(self.meta_width, self.meta_height)
+        except Exception:
+            pass
+
     def _open_color_dialog(self):
         c = QColorDialog.getColor(QColor(*self.colors.pos), self, "Positive Polarity Colour")
         if c.isValid(): self.colors.pos = (c.red(), c.green(), c.blue())
         c2 = QColorDialog.getColor(QColor(*self.colors.neg), self, "Negative Polarity Colour")
         if c2.isValid(): self.colors.neg = (c2.red(), c2.green(), c2.blue())
+        self._apply_visual_params()
 
     # ---------- Playback ----------
 
@@ -477,6 +589,7 @@ class MainWindow(QMainWindow):
             self.view.setText("No source loaded.")
             return
 
+        n_slices = 0
         if self.playing:
             # How many slices should we consume this frame?
             dt_us = getattr(self.reader, "delta_t_us", 5000) or 5000
@@ -498,11 +611,25 @@ class MainWindow(QMainWindow):
                         break
 
                     # Filters
-                    frame_state = {}
+                    frame_state: dict[str, object] = {}
                     if self.enable_refractory:
                         ev = self.filter_refractory.process(ev, frame_state).get("events", ev)
                     if self.enable_baf:
                         ev = self.filter_baf.process(ev, frame_state).get("events", ev)
+
+                    if self.active_visual_filter is not None:
+                        if self._events_dtype is None:
+                            self._events_dtype = ev.dtype
+                        try:
+                            vis_state = {}
+                            result = self.active_visual_filter.process(ev, vis_state)
+                            if isinstance(result, dict):
+                                vis_state.update(result)
+                            self._overlay_state = vis_state
+                        except Exception:
+                            self._overlay_state = {}
+                    else:
+                        self._overlay_state = None
 
                     # Render
                     self._ensure_canvas()
@@ -512,9 +639,13 @@ class MainWindow(QMainWindow):
                 if self.canvas is not None:
                     self.canvas *= self.decay_per_frame
 
+        if self.active_visual_filter is not None and (not self.playing or n_slices == 0):
+            self._update_overlay_idle(self._frame_interval_us)
+
         # Present
         if self.canvas is not None:
-            rgb8 = np.clip(self.canvas * 255.0, 0, 255).astype(np.uint8)
+            overlay_state = self._overlay_state if self.active_visual_filter else None
+            rgb8 = compose_frame(self.canvas, self.colors.pos, self.colors.neg, overlay_state)
             h, w, _ = rgb8.shape
             qimg = QImage(rgb8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             self.view.setPixmap(QPixmap.fromImage(qimg))
@@ -538,6 +669,7 @@ class MainWindow(QMainWindow):
             self._ensure_canvas()
             self.filter_baf.reset(self.meta_width, self.meta_height)
             self.filter_refractory.reset(self.meta_width, self.meta_height)
+            self._reset_visual_filter()
 
     def _composite_events(self, ev: np.ndarray):
         if self.canvas is None:
@@ -568,6 +700,19 @@ class MainWindow(QMainWindow):
 
         try:
             self.current_time_us = int(ev["t"][-1])
+        except Exception:
+            pass
+
+    def _update_overlay_idle(self, dt_hint_us: float) -> None:
+        if self.active_visual_filter is None or self._events_dtype is None:
+            return
+        empty = np.empty(0, dtype=self._events_dtype)
+        state: dict[str, object] = {"dt_hint_us": float(dt_hint_us)}
+        try:
+            result = self.active_visual_filter.process(empty, state)
+            if isinstance(result, dict):
+                state.update(result)
+            self._overlay_state = state
         except Exception:
             pass
 
@@ -641,6 +786,10 @@ class MainWindow(QMainWindow):
             baf_params=self.filter_baf.params(),
             enable_refractory=self.enable_refractory,
             refractory_params=self.filter_refractory.params(),
+            visual_filter_name=self.visual_filter_name,
+            visual_filter_params=dict(
+                self.visual_param_store.get(self.visual_filter_name, {})
+            ) if self.visual_filter_name else {},
         )
 
         thread = QThread(self)
