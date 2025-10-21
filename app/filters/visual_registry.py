@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Dict, Type
 
-from .base import BaseFilter
-from .event_count import EventCountFilter
-from .event_corners import EventCornerFilter
-from .event_optical_flow import EventOpticalFlowFilter
-from .event_deblurring import EventDeblurFilter
-from .hdr_visualisation import HDRVisualizationFilter
+from app.filters.base import BaseFilter
+from app.filters.event_count import EventCountFilter
+from app.filters.event_corners import EventCornerFilter
+from app.filters.event_optical_flow import EventOpticalFlowFilter
+from app.filters.event_deblurring import EventDeblurFilter
+from app.filters.hdr_visualisation import HDRVisualizationFilter
 
 
 VISUAL_FILTERS: Dict[str, Type[BaseFilter]] = {

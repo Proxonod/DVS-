@@ -13,8 +13,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from .ui.main_window import MainWindow
-from .io.metavision_reader import default_sample_path
+from app.io.metavision_reader import default_sample_path
+from app.ui.main_window import MainWindow
 
 
 def main() -> None:

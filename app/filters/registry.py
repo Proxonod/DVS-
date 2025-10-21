@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from typing import Dict, Type
 
-from .base import BaseFilter
-from .baf import BackgroundActivityFilter
-from .refractory import RefractoryFilter
-from .time_surface import TimeSurfaceFilter
+from app.filters.base import BaseFilter
+from app.filters.baf import BackgroundActivityFilter
+from app.filters.refractory import RefractoryFilter
+from app.filters.time_surface import TimeSurfaceFilter
 
 
 # Map human‑readable names to filter classes.  When adding new filters

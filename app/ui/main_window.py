@@ -33,12 +33,12 @@ from PySide6.QtWidgets import (
     QDockWidget,
 )
 
-from ..io.metavision_reader import MetavisionReader, is_metavision_raw
-from ..filters.baf import BackgroundActivityFilter
-from ..filters.refractory import RefractoryFilter
-from ..filters.visual_registry import create_visual_filter, list_visual_filters
-from ..core.visualization import compose_frame
-from .filter_panel import FilterPanel
+from app.core.visualization import compose_frame
+from app.filters.baf import BackgroundActivityFilter
+from app.filters.refractory import RefractoryFilter
+from app.filters.visual_registry import create_visual_filter, list_visual_filters
+from app.io.metavision_reader import MetavisionReader, is_metavision_raw
+from app.ui.filter_panel import FilterPanel
 
 
 @dataclass

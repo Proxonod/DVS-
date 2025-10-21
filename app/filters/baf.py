@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Dict
 import numpy as np
-from .base import BaseFilter
+from app.filters.base import BaseFilter
 
 try:
     from numba import njit

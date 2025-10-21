@@ -35,9 +35,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .core.pipeline import Pipeline
-from .filters.registry import create_filter
-from .io.metavision_reader import MetavisionReader, default_sample_path, is_metavision_raw
+from app.core.pipeline import Pipeline
+from app.filters.registry import create_filter
+from app.io.metavision_reader import (
+    MetavisionReader,
+    default_sample_path,
+    is_metavision_raw,
+)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

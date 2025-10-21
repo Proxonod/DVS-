@@ -17,7 +17,7 @@ from typing import Dict
 
 import numpy as np
 
-from .base import BaseFilter
+from app.filters.base import BaseFilter
 
 
 class RefractoryFilter(BaseFilter):
