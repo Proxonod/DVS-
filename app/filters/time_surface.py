@@ -35,7 +35,7 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - no CUDA runtime in tests
     cp = None
 
-from .base import BaseFilter
+from app.filters.base import BaseFilter
 
 
 class TimeSurfaceFilter(BaseFilter):

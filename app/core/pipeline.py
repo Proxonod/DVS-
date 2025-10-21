@@ -25,7 +25,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from ..filters.base import BaseFilter
+from app.filters.base import BaseFilter
 
 
 def hex_to_rgb(col: str) -> Tuple[int, int, int]:

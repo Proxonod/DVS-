@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 
 import numpy as np
 
-from .base import BaseFilter
+from app.filters.base import BaseFilter
 
 
 class EventDeblurFilter(BaseFilter):
