@@ -102,36 +102,30 @@ class VideoExportWorker(QObject):
         if events is None or events.size == 0:
             return compose_frame(canvas, self.pos_colour_tuple, self.neg_colour_tuple, overlay_state)
 
-        xs = events["x"].astype(int, copy=False)
-        ys = events["y"].astype(int, copy=False)
-        ps = events["p"].astype(int, copy=False)
+        xs = events["x"].astype(np.intp, copy=False)
+        ys = events["y"].astype(np.intp, copy=False)
+        ps = events["p"].astype(np.uint8, copy=False)
 
         h, w, _ = canvas.shape
         xs = np.clip(xs, 0, w - 1)
         ys = np.clip(ys, 0, h - 1)
 
-        if np.any(ps == 1):
-            idx = (ys[ps == 1], xs[ps == 1])
-            canvas[idx] = np.minimum(1.0, canvas[idx] + self.pos_colour)
-        if np.any(ps == 0):
-            idx = (ys[ps == 0], xs[ps == 0])
-            canvas[idx] = np.minimum(1.0, canvas[idx] + self.neg_colour)
-        
+        flat_size = h * w
+        flat_indices = ys * w + xs
+
         pos_mask = ps == 1
         if np.any(pos_mask):
-            y_pos = ys[pos_mask]
-            x_pos = xs[pos_mask]
-            np.add.at(canvas[..., 0], (y_pos, x_pos), self.pos_colour[0])
-            np.add.at(canvas[..., 1], (y_pos, x_pos), self.pos_colour[1])
-            np.add.at(canvas[..., 2], (y_pos, x_pos), self.pos_colour[2])
+            counts = np.bincount(flat_indices[pos_mask], minlength=flat_size)
+            if counts.any():
+                counts = counts.astype(canvas.dtype, copy=False).reshape(h, w)
+                canvas += counts[..., None] * self.pos_colour
 
         neg_mask = ps == 0
         if np.any(neg_mask):
-            y_neg = ys[neg_mask]
-            x_neg = xs[neg_mask]
-            np.add.at(canvas[..., 0], (y_neg, x_neg), self.neg_colour[0])
-            np.add.at(canvas[..., 1], (y_neg, x_neg), self.neg_colour[1])
-            np.add.at(canvas[..., 2], (y_neg, x_neg), self.neg_colour[2])
+            counts = np.bincount(flat_indices[neg_mask], minlength=flat_size)
+            if counts.any():
+                counts = counts.astype(canvas.dtype, copy=False).reshape(h, w)
+                canvas += counts[..., None] * self.neg_colour
 
         np.clip(canvas, 0.0, 1.0, out=canvas)
         return compose_frame(canvas, self.pos_colour_tuple, self.neg_colour_tuple, overlay_state)
@@ -314,6 +308,7 @@ class MainWindow(QMainWindow):
         self.last_frame_ts = time.perf_counter()
         self.decay_per_frame = 0.90
         self.canvas: Optional[np.ndarray] = None
+        self.profile_render = False
 
         # Speed control via slice accumulator
         self._slice_accum: float = 0.0
@@ -722,6 +717,10 @@ class MainWindow(QMainWindow):
             return
 
         n_slices = 0
+        timing_enabled = self.profile_render
+        filter_time = 0.0
+        composite_time = 0.0
+        compose_time = 0.0
         if self.playing:
             # How many slices should we consume this frame?
             dt_us = getattr(self.reader, "delta_t_us", 5000) or 5000
@@ -745,6 +744,8 @@ class MainWindow(QMainWindow):
 
                     # Filters
                     frame_state: dict[str, object] = {}
+                    if timing_enabled:
+                        t_filter_start = time.perf_counter()
                     if self.enable_refractory:
                         ev = self.filter_refractory.process(ev, frame_state).get("events", ev)
                     if self.enable_baf:
@@ -763,10 +764,16 @@ class MainWindow(QMainWindow):
                             self._overlay_state = {}
                     else:
                         self._overlay_state = None
+                    if timing_enabled:
+                        filter_time += time.perf_counter() - t_filter_start
 
                     # Render
                     self._ensure_canvas()
+                    if timing_enabled:
+                        t_comp_start = time.perf_counter()
                     self._composite_events(ev)
+                    if timing_enabled:
+                        composite_time += time.perf_counter() - t_comp_start
                     processed_any = True
 
             if not processed_any and self.canvas is not None:
@@ -778,12 +785,22 @@ class MainWindow(QMainWindow):
         # Present
         if self.canvas is not None:
             overlay_state = self._overlay_state if self.active_visual_filter else None
+            if timing_enabled:
+                t_cf_start = time.perf_counter()
             rgb8 = compose_frame(self.canvas, self.colors.pos, self.colors.neg, overlay_state)
+            if timing_enabled:
+                compose_time += time.perf_counter() - t_cf_start
             h, w, _ = rgb8.shape
             qimg = QImage(rgb8.data, w, h, 3 * w, QImage.Format.Format_RGB888)
             self.view.setPixmap(QPixmap.fromImage(qimg))
 
         self._update_hud()
+        if timing_enabled:
+            print(
+                "[Timing] filters={:.3f} ms, composite={:.3f} ms, compose_frame={:.3f} ms".format(
+                    filter_time * 1000.0, composite_time * 1000.0, compose_time * 1000.0
+                )
+            )
 
     # ---------- Rendering ----------
 
@@ -811,9 +828,9 @@ class MainWindow(QMainWindow):
         if ev is None or ev.size == 0:
             return
 
-        xs = ev["x"].astype(int, copy=False)
-        ys = ev["y"].astype(int, copy=False)
-        ps = ev["p"].astype(int, copy=False)
+        xs = ev["x"].astype(np.intp, copy=False)
+        ys = ev["y"].astype(np.intp, copy=False)
+        ps = ev["p"].astype(np.uint8, copy=False)
 
         # Dynamic resize if needed
         self._grow_canvas_if_needed(xs, ys)
@@ -821,21 +838,26 @@ class MainWindow(QMainWindow):
         xs = np.clip(xs, 0, self.meta_width - 1)
         ys = np.clip(ys, 0, self.meta_height - 1)
 
+        total_pixels = self.meta_width * self.meta_height
+        flat_indices = ys * self.meta_width + xs
+
         pos_mask = ps == 1
         if np.any(pos_mask):
-            y_pos = ys[pos_mask]
-            x_pos = xs[pos_mask]
-            np.add.at(self.canvas[..., 0], (y_pos, x_pos), self._pos_colour_vec[0])
-            np.add.at(self.canvas[..., 1], (y_pos, x_pos), self._pos_colour_vec[1])
-            np.add.at(self.canvas[..., 2], (y_pos, x_pos), self._pos_colour_vec[2])
+            counts = np.bincount(flat_indices[pos_mask], minlength=total_pixels)
+            if counts.any():
+                counts = counts.astype(self.canvas.dtype, copy=False).reshape(
+                    self.meta_height, self.meta_width
+                )
+                self.canvas += counts[..., None] * self._pos_colour_vec
 
         neg_mask = ps == 0
         if np.any(neg_mask):
-            y_neg = ys[neg_mask]
-            x_neg = xs[neg_mask]
-            np.add.at(self.canvas[..., 0], (y_neg, x_neg), self._neg_colour_vec[0])
-            np.add.at(self.canvas[..., 1], (y_neg, x_neg), self._neg_colour_vec[1])
-            np.add.at(self.canvas[..., 2], (y_neg, x_neg), self._neg_colour_vec[2])
+            counts = np.bincount(flat_indices[neg_mask], minlength=total_pixels)
+            if counts.any():
+                counts = counts.astype(self.canvas.dtype, copy=False).reshape(
+                    self.meta_height, self.meta_width
+                )
+                self.canvas += counts[..., None] * self._neg_colour_vec
 
         np.clip(self.canvas, 0.0, 1.0, out=self.canvas)
 
