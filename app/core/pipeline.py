@@ -62,6 +62,7 @@ class Pipeline:
     height: int = 0
     pos_colour: Tuple[int, int, int] = field(default_factory=lambda: hex_to_rgb("#00FFAA"))
     neg_colour: Tuple[int, int, int] = field(default_factory=lambda: hex_to_rgb("#FF3366"))
+    _canvas: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def reset(self, width: int, height: int) -> None:
         """Reset the pipeline for a new stream.
@@ -80,6 +81,7 @@ class Pipeline:
         """
         self.width = width
         self.height = height
+        self._canvas = None
         for f in self.filters:
             # Many filters allocate arrays based on sensor dimensions.
             try:
@@ -135,16 +137,15 @@ class Pipeline:
                 # Silently ignore exceptions in filters to avoid dropping
                 # the entire pipeline; a robust implementation would log
                 # and allow user control.
-                out = {}
-            # Allow filters to modify the event stream
-            if isinstance(out, dict) and "events" in out:
-                current_events = out["events"]
-            # Merge any auxiliary outputs into state
+                out = None
             if isinstance(out, dict):
-                for k, v in out.items():
-                    if k == "events":
-                        continue
-                    state[k] = v
+                events_out = out.get("events")
+                if events_out is not None:
+                    current_events = events_out
+                if out:
+                    for key, value in out.items():
+                        if key != "events":
+                            state[key] = value
         state["events"] = current_events
         return state
 
@@ -177,11 +178,13 @@ class Pipeline:
             )
         events = state.get("events")
         if events is None or len(events) == 0:
-            return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            canvas = self._ensure_canvas()
+            canvas.fill(0)
+            return canvas.astype(np.uint8)
 
-        xs = np.asarray(events["x"], dtype=np.intp)
-        ys = np.asarray(events["y"], dtype=np.intp)
-        ps = np.asarray(events["p"], dtype=np.uint8)
+        xs = events["x"].astype(np.intp, copy=False)
+        ys = events["y"].astype(np.intp, copy=False)
+        ps = events["p"].astype(np.uint8, copy=False)
 
         valid = (
             (xs >= 0)
@@ -190,31 +193,40 @@ class Pipeline:
             & (ys < self.height)
         )
         if not np.any(valid):
-            return np.zeros((self.height, self.width, 3), dtype=np.uint8)
+            canvas = self._ensure_canvas()
+            canvas.fill(0)
+            return canvas.astype(np.uint8)
 
         xs = xs[valid]
         ys = ys[valid]
         ps = ps[valid]
 
-        canvas = np.zeros((self.height, self.width, 3), dtype=np.uint16)
-        pos_colour = np.array(self.pos_colour, dtype=np.uint16)
-        neg_colour = np.array(self.neg_colour, dtype=np.uint16)
+        canvas = self._ensure_canvas()
+        canvas.fill(0)
 
-        pos_idx = ps == 1
-        if np.any(pos_idx):
-            y_pos = ys[pos_idx]
-            x_pos = xs[pos_idx]
-            np.add.at(canvas[..., 0], (y_pos, x_pos), pos_colour[0])
-            np.add.at(canvas[..., 1], (y_pos, x_pos), pos_colour[1])
-            np.add.at(canvas[..., 2], (y_pos, x_pos), pos_colour[2])
+        pos_colour = np.asarray(self.pos_colour, dtype=canvas.dtype)
+        neg_colour = np.asarray(self.neg_colour, dtype=canvas.dtype)
+        flat_size = self.width * self.height
+        flat_indices = ys * self.width + xs
 
-        neg_idx = ps == 0
-        if np.any(neg_idx):
-            y_neg = ys[neg_idx]
-            x_neg = xs[neg_idx]
-            np.add.at(canvas[..., 0], (y_neg, x_neg), neg_colour[0])
-            np.add.at(canvas[..., 1], (y_neg, x_neg), neg_colour[1])
-            np.add.at(canvas[..., 2], (y_neg, x_neg), neg_colour[2])
+        pos_mask = ps == 1
+        if np.any(pos_mask):
+            counts = np.bincount(flat_indices[pos_mask], minlength=flat_size)
+            if counts.any():
+                counts = counts.astype(canvas.dtype, copy=False).reshape(self.height, self.width)
+                canvas += counts[..., None] * pos_colour
+
+        neg_mask = ps == 0
+        if np.any(neg_mask):
+            counts = np.bincount(flat_indices[neg_mask], minlength=flat_size)
+            if counts.any():
+                counts = counts.astype(canvas.dtype, copy=False).reshape(self.height, self.width)
+                canvas += counts[..., None] * neg_colour
 
         np.clip(canvas, 0, 255, out=canvas)
         return canvas.astype(np.uint8)
+
+    def _ensure_canvas(self) -> np.ndarray:
+        if self._canvas is None or self._canvas.shape != (self.height, self.width, 3):
+            self._canvas = np.zeros((self.height, self.width, 3), dtype=np.uint32)
+        return self._canvas
