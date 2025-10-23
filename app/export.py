@@ -107,7 +107,15 @@ def _create_video_writer(out_path: str, codec: str, fps: float, frame_size: tupl
     return writer
 
 
-def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: float, fps: float, out_path: str, codec: str) -> None:
+def export_stream(
+    reader: MetavisionReader,
+    pipeline: Pipeline,
+    duration_s: float,
+    fps: float,
+    out_path: str,
+    codec: str,
+    speed: float = 1.0,
+) -> None:
     """Render a stream and write it to a video file via OpenCV.
 
     Parameters
@@ -124,6 +132,9 @@ def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: floa
         Destination file path.
     codec:
         Codec string understood by :func:`_create_video_writer`.
+    speed:
+        Playback speed multiplier.  Values above 1 speed up the video, values below
+        1 slow it down.
     """
     width = reader.metadata.width
     height = reader.metadata.height
@@ -133,7 +144,11 @@ def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: floa
             width, height = dims
     if width is None or height is None:
         raise RuntimeError("Sensorauflösung konnte nicht ermittelt werden.")
-    frame_interval_us = int(1e6 / fps)
+    # ``speed`` values above 1.0 compress the source time so the video plays faster,
+    # values between 0 and 1 stretch it for slow motion.  Clamp to a sane minimum to
+    # avoid a zero frame interval when extremely small speeds are requested.
+    base_interval_us = 1e6 / max(fps, 1e-6)
+    frame_interval_us = int(max(1, base_interval_us * max(speed, 1e-6)))
     max_time_us = int(duration_s * 1e6)
     frame_size = (int(width), int(height))
     writer = _create_video_writer(out_path, codec, fps, frame_size)

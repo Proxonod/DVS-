@@ -76,8 +76,15 @@ class ExportWorker(QThread):
             if duration_us is None or duration_us <= 0:
                 raise RuntimeError("Dauer des RAW-Streams konnte nicht bestimmt werden.")
             duration_s = duration_us / 1e6
-            adjusted_duration = duration_s / max(self.speed, 1e-6)
-            export_stream(reader, pipeline, adjusted_duration, self.fps, self.out_path, codec)
+            export_stream(
+                reader,
+                pipeline,
+                duration_s,
+                self.fps,
+                self.out_path,
+                codec,
+                self.speed,
+            )
         except Exception as exc:  # noqa: BLE001 - surface message to UI
             self.failed.emit(str(exc))
             return
