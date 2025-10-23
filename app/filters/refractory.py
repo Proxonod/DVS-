@@ -58,7 +58,7 @@ class RefractoryFilter(BaseFilter):
             y = ys[i]
             t = ts[i]
             # Accept if time difference exceeds refractory period
-            if t - last[y, x] >= refractory:
+            if int(t) - int(last[y, x]) >= refractory:
                 mask[i] = True
                 last[y, x] = t
         return {"events": events[mask]}
