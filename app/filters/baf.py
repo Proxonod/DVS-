@@ -18,10 +18,10 @@ class BackgroundActivityFilter(BaseFilter):
 
     def __init__(
         self,
-        window_ms: float = 50.0,
-        count_threshold: int = 1,
-        refractory_us: int = 500,
-        spatial_radius: int = 1,
+        window_ms: float = 20.0,
+        count_threshold: int = 2,
+        refractory_us: int = 1000,
+        spatial_radius: int = 2,
     ) -> None:
         self.window_us = int(window_ms * 1000)
         self.count_threshold = max(1, int(count_threshold))
@@ -111,6 +111,8 @@ def _baf_kernel_python(
         count = 0
         for yy in range(y0, y1 + 1):
             for xx in range(x0, x1 + 1):
+                if xx == x and yy == y:
+                    continue
                 if t - float(last_times[yy, xx]) <= window_us:
                     count += 1
                     if count >= count_threshold:
@@ -157,6 +159,9 @@ if njit is not None:
             while yy <= y1:
                 xx = x0
                 while xx <= x1:
+                    if xx == x and yy == y:
+                        xx += 1
+                        continue
                     if t - last_times[yy, xx] <= window_us:
                         count += 1
                         if count >= count_threshold:

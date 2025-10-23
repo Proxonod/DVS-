@@ -48,9 +48,9 @@ void testRefractoryFilter() {
 }
 
 void testBackgroundActivityFilter() {
-    BackgroundActivityFilter filter(10.0, 1, 0, 1);
-    filter.reset(5, 5);
-    auto events = makeEvents({{2, 2}, {3, 2}}, {0, 5000}, {1, 1});
+    BackgroundActivityFilter filter(20.0, 2, 0, 2);
+    filter.reset(6, 6);
+    auto events = makeEvents({{2, 2}, {1, 2}, {3, 2}}, {0, 2000, 5000}, {1, 1, 1});
     dvs::PipelineState state;
     filter.process(events, state);
     assert(events.size() == 1);

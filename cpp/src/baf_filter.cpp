@@ -68,6 +68,9 @@ void BackgroundActivityFilter::process(EventBuffer& events, PipelineState&) {
         for (int yy = y0; yy <= y1 && count < count_threshold_; ++yy) {
             const size_t row = static_cast<size_t>(yy) * width_;
             for (int xx = x0; xx <= x1; ++xx) {
+                if (xx == ev.x && yy == ev.y) {
+                    continue;
+                }
                 const int64_t neighbour_dt = ev.t - last_times_[row + xx];
                 if (neighbour_dt <= window_us_) {
                     ++count;

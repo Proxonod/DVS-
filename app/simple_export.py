@@ -44,7 +44,12 @@ def _parse_colour(value: str | None, fallback: Tuple[int, int, int]) -> Tuple[in
 
 def _build_pipeline(width: int, height: int) -> Pipeline:
     pipeline = Pipeline()
-    for name in ("BackgroundActivityFilter", "RefractoryFilter", "TimeSurface"):
+    for name in (
+        "NeighborhoodActivityFilter",
+        "BackgroundActivityFilter",
+        "RefractoryFilter",
+        "TimeSurface",
+    ):
         try:
             filt = create_filter(name)
         except Exception:

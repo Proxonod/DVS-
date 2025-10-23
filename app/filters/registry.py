@@ -13,6 +13,7 @@ from typing import Dict, Type
 
 from app.filters.base import BaseFilter
 from app.filters.baf import BackgroundActivityFilter
+from app.filters.neighborhood import NeighborhoodActivityFilter
 from app.filters.refractory import RefractoryFilter
 from app.filters.time_surface import TimeSurfaceFilter
 
@@ -22,6 +23,7 @@ from app.filters.time_surface import TimeSurfaceFilter
 # the ``name`` attribute of the class.
 FILTERS: Dict[str, Type[BaseFilter]] = {
     BackgroundActivityFilter.name: BackgroundActivityFilter,
+    NeighborhoodActivityFilter.name: NeighborhoodActivityFilter,
     RefractoryFilter.name: RefractoryFilter,
     TimeSurfaceFilter.name: TimeSurfaceFilter,
 }
