@@ -62,7 +62,11 @@ class ExportWorker(QThread):
         reader: MetavisionReader | None = None
         try:
             reader = MetavisionReader.from_raw(self.raw_path)
-            pipeline = _build_pipeline(reader.metadata.width, reader.metadata.height)
+            dims = reader.ensure_sensor_size()
+            if dims is None:
+                raise RuntimeError("Sensorauflösung konnte nicht ermittelt werden.")
+            width, height = dims
+            pipeline = _build_pipeline(width, height)
             pipeline.pos_colour = _parse_colour(self.pos_colour, pipeline.pos_colour)
             pipeline.neg_colour = _parse_colour(self.neg_colour, pipeline.neg_colour)
             codec = "ffv1" if self.codec == "ffv1" else "mp4"

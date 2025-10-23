@@ -87,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"Unsupported input file: {raw_path}")
 
     reader = MetavisionReader.from_raw(str(raw_path))
-    pipeline = _build_pipeline(reader.metadata.width, reader.metadata.height)
+    dims = reader.ensure_sensor_size()
+    if dims is None:
+        raise RuntimeError("Sensorauflösung konnte nicht ermittelt werden.")
+    width, height = dims
+    pipeline = _build_pipeline(width, height)
 
     # Apply custom colours if provided
     pipeline.pos_colour = _parse_colour(args.pos_colour, pipeline.pos_colour)
