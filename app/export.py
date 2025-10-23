@@ -190,12 +190,18 @@ def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: floa
     max_time_us = int(duration_s * 1e6)
     ffmpeg_cmd = build_ffmpeg_command(width, height, fps, out_path, codec)
     # Start FFmpeg process
-    proc = subprocess.Popen(
-        ffmpeg_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "FFmpeg konnte nicht gestartet werden. "
+            "Bitte stellen Sie sicher, dass 'ffmpeg' installiert ist und sich im PATH befindet."
+        ) from exc
     # Event accumulation and rendering loop
     current_buffer: list[np.ndarray] = []
     accumulated_time = 0
