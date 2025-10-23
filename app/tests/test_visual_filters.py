@@ -40,6 +40,16 @@ def test_compose_frame_event_count_gradient():
     assert diff_pos < diff_neg
 
 
+def test_compose_frame_resizes_overlays():
+    canvas = np.zeros((3, 3, 3), dtype=np.float32)
+    overlay = np.ones((6, 9), dtype=np.float32)
+    frame = compose_frame(canvas, (0, 255, 0), (255, 0, 0), {"overlay_event_count": overlay})
+    assert frame.shape == (3, 3, 3)
+    assert frame.dtype == np.uint8
+    # The resized overlay should have non-zero contribution everywhere.
+    assert np.all(frame[..., 1] > 0)
+
+
 def test_hdr_filter_produces_frame():
     filt = HDRVisualizationFilter(tau_ms=5.0)
     filt.reset(3, 3)
