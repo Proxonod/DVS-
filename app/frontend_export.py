@@ -195,16 +195,22 @@ class ExportWindow(QWidget):
         )
         self.worker.finished.connect(self._on_finished)
         self.worker.failed.connect(self._on_failed)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker.failed.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _on_finished(self, out_path: str) -> None:
+        worker = self.worker
+        self.worker = None
+        if worker is not None:
+            worker.deleteLater()
         self.status_label.setText(f"Fertig: {out_path}")
         self.export_btn.setEnabled(True)
         QMessageBox.information(self, "Export abgeschlossen", f"Video gespeichert unter:\n{out_path}")
 
     def _on_failed(self, message: str) -> None:
+        worker = self.worker
+        self.worker = None
+        if worker is not None:
+            worker.deleteLater()
         self.status_label.setText("Fehler beim Export")
         self.export_btn.setEnabled(True)
         QMessageBox.critical(self, "Fehler", message)
