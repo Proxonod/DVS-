@@ -23,6 +23,8 @@ class FilterPanel(QWidget):
         self,
         on_toggle_baf: Callable[[bool], None],
         on_change_baf: Callable[[int, int, int, int], None],
+        on_toggle_neighbourhood: Callable[[bool], None],
+        on_change_neighbourhood: Callable[[int, int, int, int], None],
         on_toggle_refractory: Callable[[bool], None],
         on_change_refractory: Callable[[int], None],
         on_select_visual: Callable[[str | None], None],
@@ -45,7 +47,7 @@ class FilterPanel(QWidget):
         hb1.addWidget(QLabel("window_ms"))
         self.sp_baf_win = QSpinBox()
         self.sp_baf_win.setRange(1, 2000)
-        self.sp_baf_win.setValue(50)
+        self.sp_baf_win.setValue(20)
         hb1.addWidget(self.sp_baf_win)
         vb.addLayout(hb1)
 
@@ -54,7 +56,7 @@ class FilterPanel(QWidget):
         hb2.addWidget(QLabel("count_threshold"))
         self.sp_baf_cnt = QSpinBox()
         self.sp_baf_cnt.setRange(1, 20)
-        self.sp_baf_cnt.setValue(1)
+        self.sp_baf_cnt.setValue(2)
         hb2.addWidget(self.sp_baf_cnt)
         vb.addLayout(hb2)
 
@@ -63,7 +65,7 @@ class FilterPanel(QWidget):
         hb3.addWidget(QLabel("refractory_us"))
         self.sp_baf_ref = QSpinBox()
         self.sp_baf_ref.setRange(0, 200000)
-        self.sp_baf_ref.setValue(500)
+        self.sp_baf_ref.setValue(1000)
         hb3.addWidget(self.sp_baf_ref)
         vb.addLayout(hb3)
 
@@ -71,8 +73,8 @@ class FilterPanel(QWidget):
         hb4 = QHBoxLayout()
         hb4.addWidget(QLabel("spatial_radius"))
         self.sp_baf_rad = QSpinBox()
-        self.sp_baf_rad.setRange(0, 5)
-        self.sp_baf_rad.setValue(1)
+        self.sp_baf_rad.setRange(0, 8)
+        self.sp_baf_rad.setValue(2)
         hb4.addWidget(self.sp_baf_rad)
         vb.addLayout(hb4)
 
@@ -88,6 +90,57 @@ class FilterPanel(QWidget):
             )
 
         root.addWidget(gb_baf)
+
+        # Neighbourhood filter group
+        gb_nb = QGroupBox("Neighbourhood Filter")
+        vb_nb = QVBoxLayout(gb_nb)
+        self.chk_nb = QCheckBox("Enable neighbourhood filter")
+        self.chk_nb.stateChanged.connect(lambda s: on_toggle_neighbourhood(s == Qt.Checked))
+        vb_nb.addWidget(self.chk_nb)
+
+        hb_nb1 = QHBoxLayout()
+        hb_nb1.addWidget(QLabel("radius"))
+        self.sp_nb_radius = QSpinBox()
+        self.sp_nb_radius.setRange(0, 8)
+        self.sp_nb_radius.setValue(2)
+        hb_nb1.addWidget(self.sp_nb_radius)
+        vb_nb.addLayout(hb_nb1)
+
+        hb_nb2 = QHBoxLayout()
+        hb_nb2.addWidget(QLabel("time_step_us"))
+        self.sp_nb_step = QSpinBox()
+        self.sp_nb_step.setRange(1, 20000)
+        self.sp_nb_step.setValue(2000)
+        hb_nb2.addWidget(self.sp_nb_step)
+        vb_nb.addLayout(hb_nb2)
+
+        hb_nb3 = QHBoxLayout()
+        hb_nb3.addWidget(QLabel("time_steps"))
+        self.sp_nb_steps = QSpinBox()
+        self.sp_nb_steps.setRange(1, 20)
+        self.sp_nb_steps.setValue(5)
+        hb_nb3.addWidget(self.sp_nb_steps)
+        vb_nb.addLayout(hb_nb3)
+
+        hb_nb4 = QHBoxLayout()
+        hb_nb4.addWidget(QLabel("min_neighbours"))
+        self.sp_nb_min = QSpinBox()
+        self.sp_nb_min.setRange(1, 8)
+        self.sp_nb_min.setValue(1)
+        hb_nb4.addWidget(self.sp_nb_min)
+        vb_nb.addLayout(hb_nb4)
+
+        for sp in (self.sp_nb_radius, self.sp_nb_step, self.sp_nb_steps, self.sp_nb_min):
+            sp.valueChanged.connect(
+                lambda _=None: on_change_neighbourhood(
+                    self.sp_nb_radius.value(),
+                    self.sp_nb_step.value(),
+                    self.sp_nb_steps.value(),
+                    self.sp_nb_min.value(),
+                )
+            )
+
+        root.addWidget(gb_nb)
 
         # Refractory group
         gb_ref = QGroupBox("Refractory (per pixel)")

@@ -9,10 +9,10 @@ namespace dvs {
 
 class BackgroundActivityFilter : public Filter {
 public:
-    BackgroundActivityFilter(double window_ms = 50.0,
-                             int count_threshold = 1,
-                             int64_t refractory_us = 500,
-                             int spatial_radius = 1);
+    BackgroundActivityFilter(double window_ms = 20.0,
+                             int count_threshold = 2,
+                             int64_t refractory_us = 1000,
+                             int spatial_radius = 2);
 
     void reset(int width, int height) override;
     void process(EventBuffer& events, PipelineState& state) override;

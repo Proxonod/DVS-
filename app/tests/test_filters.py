@@ -9,6 +9,7 @@ surface decay and basic pipeline composition.
 import numpy as np
 
 from app.filters.baf import BackgroundActivityFilter
+from app.filters.neighborhood import NeighborhoodActivityFilter
 from app.filters.refractory import RefractoryFilter
 from app.filters.time_surface import TimeSurfaceFilter
 from app.core.pipeline import Pipeline
@@ -55,21 +56,33 @@ def test_refractory_filter():
     assert list(out["t"]) == [0, 700]
 
 
-def test_baf_filter_simple():
-    """BAF should suppress isolated events without recent neighbours."""
-    # window_ms=10ms, threshold=1, radius=1
-    filt = BackgroundActivityFilter(window_ms=10.0, count_threshold=1, refractory_us=0, spatial_radius=1)
-    filt.reset(5, 5)
-    # Two events separated spatially and temporally: first has no neighbours, second occurs near first
+def test_baf_filter_requires_multiple_neighbours():
+    """BAF should keep events only when enough neighbours exist in the window."""
+    filt = BackgroundActivityFilter(window_ms=20.0, count_threshold=2, refractory_us=0, spatial_radius=2)
+    filt.reset(6, 6)
     events = make_events(
-        coords=[(2, 2), (3, 2)],
-        times=[0, 5000],  # microseconds
-        polarities=[1, 1],
+        coords=[(2, 2), (1, 2), (3, 2)],
+        times=[0, 2000, 5000],
+        polarities=[1, 1, 1],
     )
     out = filt.process(events, {})["events"]
-    # Only the second event should survive because it has a neighbour within window (event 1)
     assert len(out) == 1
     assert out["x"][0] == 3 and out["y"][0] == 2
+
+
+def test_neighbourhood_filter_discards_isolated_events():
+    """Neighbourhood filter should reject events without nearby support."""
+    filt = NeighborhoodActivityFilter(radius=1, time_step_us=2000, time_steps=3, min_neighbours=1)
+    filt.reset(6, 6)
+    events = make_events(
+        coords=[(2, 2), (4, 4), (2, 3), (2, 4)],
+        times=[0, 0, 2500, 15000],
+        polarities=[1, 1, 1, 1],
+    )
+    out = filt.process(events, {})["events"]
+    # Only (2,3) should remain: it has a neighbour (2,2) within both radius and time steps.
+    assert len(out) == 1
+    assert (int(out["x"][0]), int(out["y"][0])) == (2, 3)
 
 
 def test_time_surface_decay_and_boost():

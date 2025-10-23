@@ -213,6 +213,11 @@ def main(argv: list[str] | None = None) -> int:
     pipeline = Pipeline()
     # Add a background activity filter and a time surface for demonstration
     try:
+        neighbourhood = create_filter("NeighborhoodActivityFilter")
+        pipeline.add_filter(neighbourhood)
+    except Exception:
+        pass
+    try:
         baf = create_filter("BackgroundActivityFilter")
         pipeline.add_filter(baf)
     except Exception:

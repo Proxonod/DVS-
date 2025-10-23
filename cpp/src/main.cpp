@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
     Pipeline pipeline;
     pipeline.reset(width, height);
     pipeline.addFilter(std::make_unique<RefractoryFilter>(500));
-    pipeline.addFilter(std::make_unique<BackgroundActivityFilter>(10.0, 1, 0, 1));
+    pipeline.addFilter(std::make_unique<BackgroundActivityFilter>(20.0, 2, 0, 2));
     pipeline.addFilter(std::make_unique<TimeSurfaceFilter>(10.0, true));
 
     const auto start = high_resolution_clock::now();

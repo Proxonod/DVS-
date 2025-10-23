@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from app.core.visualization import compose_frame
 from app.filters.baf import BackgroundActivityFilter
+from app.filters.neighborhood import NeighborhoodActivityFilter
 from app.filters.refractory import RefractoryFilter
 from app.filters.visual_registry import create_visual_filter, list_visual_filters
 from app.io.metavision_reader import MetavisionReader, is_metavision_raw
@@ -65,6 +66,8 @@ class VideoExportWorker(QObject):
         decay: float,
         pos_colour: tuple[int, int, int],
         neg_colour: tuple[int, int, int],
+        enable_neighbourhood: bool,
+        neighbourhood_params: dict,
         enable_baf: bool,
         baf_params: dict,
         enable_refractory: bool,
@@ -85,6 +88,8 @@ class VideoExportWorker(QObject):
         self.neg_colour = np.array(neg_colour, dtype=np.float32) / 255.0
         self.pos_colour_tuple = tuple(int(v) for v in pos_colour)
         self.neg_colour_tuple = tuple(int(v) for v in neg_colour)
+        self.enable_neighbourhood = enable_neighbourhood
+        self.neighbourhood_params = dict(neighbourhood_params)
         self.enable_baf = enable_baf
         self.baf_params = dict(baf_params)
         self.enable_refractory = enable_refractory
@@ -166,8 +171,16 @@ class VideoExportWorker(QObject):
             self.error.emit(f"Unable to open video writer for {self.out_path}")
             return
 
+        neighbourhood = None
         baf = None
         refractory = None
+        if self.enable_neighbourhood:
+            neighbourhood = NeighborhoodActivityFilter()
+            try:
+                neighbourhood.set_params(**self.neighbourhood_params)
+            except Exception:
+                pass
+            neighbourhood.reset(frame_size[0], frame_size[1])
         if self.enable_baf:
             baf = BackgroundActivityFilter()
             try:
@@ -214,6 +227,9 @@ class VideoExportWorker(QObject):
                 if refractory is not None:
                     state: dict[str, object] = {}
                     events = refractory.process(events, state).get("events", events)
+                if neighbourhood is not None:
+                    state = {}
+                    events = neighbourhood.process(events, state).get("events", events)
                 if baf is not None:
                     state = {}
                     events = baf.process(events, state).get("events", events)
@@ -316,8 +332,10 @@ class MainWindow(QMainWindow):
 
         # Filters
         self.filter_baf = BackgroundActivityFilter()
+        self.filter_neighbourhood = NeighborhoodActivityFilter()
         self.filter_refractory = RefractoryFilter()
         self.enable_baf = False
+        self.enable_neighbourhood = False
         self.enable_refractory = False
         self.visual_filter_name: str | None = None
         self.visual_param_store: dict[str, dict[str, object]] = {}
@@ -428,6 +446,8 @@ class MainWindow(QMainWindow):
         panel = FilterPanel(
             on_toggle_baf=self._on_toggle_baf,
             on_change_baf=self._on_change_baf,
+            on_toggle_neighbourhood=self._on_toggle_neighbourhood,
+            on_change_neighbourhood=self._on_change_neighbourhood,
             on_toggle_refractory=self._on_toggle_refractory,
             on_change_refractory=self._on_change_refractory,
             on_select_visual=self._on_visual_filter_selected,
@@ -482,6 +502,7 @@ class MainWindow(QMainWindow):
 
         self._ensure_canvas()
         self.filter_baf.reset(self.meta_width, self.meta_height)
+        self.filter_neighbourhood.reset(self.meta_width, self.meta_height)
         self.filter_refractory.reset(self.meta_width, self.meta_height)
         self._reset_visual_filter()
         self.playing = False
@@ -508,6 +529,7 @@ class MainWindow(QMainWindow):
         self._ensure_canvas()
         self.duration_us = None
         self.filter_baf.reset(self.meta_width, self.meta_height)
+        self.filter_neighbourhood.reset(self.meta_width, self.meta_height)
         self.filter_refractory.reset(self.meta_width, self.meta_height)
         self._reset_visual_filter()
         self.playing = True
@@ -518,10 +540,30 @@ class MainWindow(QMainWindow):
 
     # ---------- Filters & colors ----------
 
-    def _on_toggle_baf(self, en: bool): self.enable_baf = en
-    def _on_change_baf(self, w, c, r, s): self.filter_baf.set_params(window_ms=w, count_threshold=c, refractory_us=r, spatial_radius=s)
-    def _on_toggle_refractory(self, en: bool): self.enable_refractory = en
-    def _on_change_refractory(self, r): self.filter_refractory.set_params(refractory_us=r)
+    def _on_toggle_baf(self, en: bool) -> None:
+        self.enable_baf = en
+
+    def _on_change_baf(self, w: int, c: int, r: int, s: int) -> None:
+        self.filter_baf.set_params(
+            window_ms=w, count_threshold=c, refractory_us=r, spatial_radius=s
+        )
+
+    def _on_toggle_neighbourhood(self, enabled: bool) -> None:
+        self.enable_neighbourhood = enabled
+
+    def _on_change_neighbourhood(self, radius: int, step_us: int, steps: int, min_n: int) -> None:
+        self.filter_neighbourhood.set_params(
+            radius=radius,
+            time_step_us=step_us,
+            time_steps=steps,
+            min_neighbours=min_n,
+        )
+
+    def _on_toggle_refractory(self, en: bool) -> None:
+        self.enable_refractory = en
+
+    def _on_change_refractory(self, r: int) -> None:
+        self.filter_refractory.set_params(refractory_us=r)
 
     def _on_visual_filter_selected(self, name: str | None) -> None:
         self._set_visual_filter(name)
@@ -748,6 +790,8 @@ class MainWindow(QMainWindow):
                         t_filter_start = time.perf_counter()
                     if self.enable_refractory:
                         ev = self.filter_refractory.process(ev, frame_state).get("events", ev)
+                    if self.enable_neighbourhood:
+                        ev = self.filter_neighbourhood.process(ev, frame_state).get("events", ev)
                     if self.enable_baf:
                         ev = self.filter_baf.process(ev, frame_state).get("events", ev)
 
@@ -818,6 +862,7 @@ class MainWindow(QMainWindow):
             self.meta_height = max(self.meta_height, max_y)
             self._ensure_canvas()
             self.filter_baf.reset(self.meta_width, self.meta_height)
+            self.filter_neighbourhood.reset(self.meta_width, self.meta_height)
             self.filter_refractory.reset(self.meta_width, self.meta_height)
             self._reset_visual_filter()
 
@@ -945,6 +990,8 @@ class MainWindow(QMainWindow):
             decay=self.decay_per_frame,
             pos_colour=self.colors.pos,
             neg_colour=self.colors.neg,
+            enable_neighbourhood=self.enable_neighbourhood,
+            neighbourhood_params=self.filter_neighbourhood.params(),
             enable_baf=self.enable_baf,
             baf_params=self.filter_baf.params(),
             enable_refractory=self.enable_refractory,
