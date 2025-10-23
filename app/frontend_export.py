@@ -8,6 +8,7 @@ rendered results match the CLI behaviour.
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -184,7 +185,7 @@ class ExportWindow(QWidget):
         self.export_btn.setEnabled(False)
         self.status_label.setText("Export läuft…")
 
-        self.worker = ExportWorker(
+        worker = ExportWorker(
             input_path,
             output_path,
             codec,
@@ -193,24 +194,23 @@ class ExportWindow(QWidget):
             pos_colour,
             neg_colour,
         )
-        self.worker.finished.connect(self._on_finished)
-        self.worker.failed.connect(self._on_failed)
-        self.worker.start()
+        worker.finished.connect(partial(self._on_finished, worker))
+        worker.failed.connect(partial(self._on_failed, worker))
+        self.worker = worker
+        worker.start()
 
-    def _on_finished(self, out_path: str) -> None:
-        worker = self.worker
-        self.worker = None
-        if worker is not None:
-            worker.deleteLater()
+    def _on_finished(self, worker: ExportWorker, out_path: str) -> None:
+        if self.worker is worker:
+            self.worker = None
+        worker.deleteLater()
         self.status_label.setText(f"Fertig: {out_path}")
         self.export_btn.setEnabled(True)
         QMessageBox.information(self, "Export abgeschlossen", f"Video gespeichert unter:\n{out_path}")
 
-    def _on_failed(self, message: str) -> None:
-        worker = self.worker
-        self.worker = None
-        if worker is not None:
-            worker.deleteLater()
+    def _on_failed(self, worker: ExportWorker, message: str) -> None:
+        if self.worker is worker:
+            self.worker = None
+        worker.deleteLater()
         self.status_label.setText("Fehler beim Export")
         self.export_btn.setEnabled(True)
         QMessageBox.critical(self, "Fehler", message)
