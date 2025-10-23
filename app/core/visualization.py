@@ -44,12 +44,79 @@ def _ensure_float_frame(canvas: np.ndarray) -> np.ndarray:
     return np.clip(frame, 0.0, 1.0)
 
 
+def _resize_image(image: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+    """Return ``image`` resized to ``target_hw`` using bilinear sampling.
+
+    The implementation intentionally avoids optional third-party
+    dependencies.  It operates on both grayscale ``(H × W)`` and colour
+    ``(H × W × C)`` arrays and always returns a floating point array.
+    """
+
+    target_h, target_w = target_hw
+    if target_h <= 0 or target_w <= 0:
+        raise ValueError("target size must be positive")
+
+    src_h, src_w = image.shape[:2]
+    if src_h == target_h and src_w == target_w:
+        return image.astype(np.float32, copy=False)
+
+    work = np.asarray(image, dtype=np.float32)
+    if work.ndim == 2:
+        work = work[..., None]
+
+    ys = np.linspace(0, src_h - 1, target_h)
+    xs = np.linspace(0, src_w - 1, target_w)
+
+    y0 = np.floor(ys).astype(np.int32)
+    x0 = np.floor(xs).astype(np.int32)
+    y1 = np.clip(y0 + 1, 0, src_h - 1)
+    x1 = np.clip(x0 + 1, 0, src_w - 1)
+
+    wy = (ys - y0)[:, None, None]
+    wx = (xs - x0)[None, :, None]
+
+    top_left = work[y0[:, None], x0[None, :]]
+    top_right = work[y0[:, None], x1[None, :]]
+    bottom_left = work[y1[:, None], x0[None, :]]
+    bottom_right = work[y1[:, None], x1[None, :]]
+
+    top = top_left * (1.0 - wx) + top_right * wx
+    bottom = bottom_left * (1.0 - wx) + bottom_right * wx
+    resized = top * (1.0 - wy) + bottom * wy
+
+    if image.ndim == 2:
+        resized = resized[..., 0]
+    return resized
+
+
+def _match_overlay_shape(frame: np.ndarray, overlay: np.ndarray) -> np.ndarray:
+    """Resize ``overlay`` so it can be blended with ``frame``."""
+
+    target_shape = frame.shape
+    if overlay.shape == target_shape:
+        return np.asarray(overlay, dtype=np.float32)
+
+    target_h, target_w = target_shape[:2]
+    resized = _resize_image(overlay, (target_h, target_w))
+    if resized.ndim == 2:
+        resized = np.repeat(resized[..., None], target_shape[2], axis=-1)
+    elif resized.shape[2] != target_shape[2]:
+        # Truncate or pad extra channels to keep blending predictable.
+        channels = min(resized.shape[2], target_shape[2])
+        resized = resized[..., :channels]
+        if channels < target_shape[2]:
+            pad_width = target_shape[2] - channels
+            resized = np.pad(resized, ((0, 0), (0, 0), (0, pad_width)))
+    return resized.astype(np.float32, copy=False)
+
+
 def _blend(base: np.ndarray, overlay: np.ndarray, alpha: float) -> np.ndarray:
     """Blend ``overlay`` onto ``base`` with opacity ``alpha``."""
 
     alpha = float(np.clip(alpha, 0.0, 1.0))
     if alpha <= 0.0:
         return base
+    overlay = _match_overlay_shape(base, overlay)
     return np.clip(base * (1.0 - alpha) + overlay * alpha, 0.0, 1.0)
 
 
