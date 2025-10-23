@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     pipeline.pos_colour = _parse_colour(args.pos_colour, pipeline.pos_colour)
     pipeline.neg_colour = _parse_colour(args.neg_colour, pipeline.neg_colour)
 
-    codec = "ffv1" if args.codec == "ffv1" else "x264-lossless"
+    codec = args.codec
     export_stream(reader, pipeline, args.duration, args.fps, args.out, codec)
     return 0
 
