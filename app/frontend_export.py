@@ -44,7 +44,7 @@ class ExportWorker(QThread):
         raw_path: str,
         out_path: str,
         codec: str,
-        duration: float,
+        speed: float,
         fps: float,
         pos_colour: str | None,
         neg_colour: str | None,
@@ -53,7 +53,7 @@ class ExportWorker(QThread):
         self.raw_path = raw_path
         self.out_path = out_path
         self.codec = codec
-        self.duration = duration
+        self.speed = speed
         self.fps = fps
         self.pos_colour = pos_colour
         self.neg_colour = neg_colour
@@ -66,7 +66,14 @@ class ExportWorker(QThread):
             pipeline.pos_colour = _parse_colour(self.pos_colour, pipeline.pos_colour)
             pipeline.neg_colour = _parse_colour(self.neg_colour, pipeline.neg_colour)
             codec = "ffv1" if self.codec == "ffv1" else "x264-lossless"
-            export_stream(reader, pipeline, self.duration, self.fps, self.out_path, codec)
+            duration_us = reader.metadata.duration_us
+            if duration_us is None or duration_us <= 0:
+                duration_us = reader.estimate_duration_us()
+            if duration_us is None or duration_us <= 0:
+                raise RuntimeError("Dauer des RAW-Streams konnte nicht bestimmt werden.")
+            duration_s = duration_us / 1e6
+            adjusted_duration = duration_s / max(self.speed, 1e-6)
+            export_stream(reader, pipeline, adjusted_duration, self.fps, self.out_path, codec)
         except Exception as exc:  # noqa: BLE001 - surface message to UI
             self.failed.emit(str(exc))
             return
@@ -100,10 +107,10 @@ class ExportWindow(QWidget):
         self.codec_combo = QComboBox()
         self.codec_combo.addItems(["mp4", "ffv1"])
 
-        self.duration_spin = QDoubleSpinBox()
-        self.duration_spin.setRange(0.1, 3600)
-        self.duration_spin.setDecimals(2)
-        self.duration_spin.setValue(5.0)
+        self.speed_spin = QDoubleSpinBox()
+        self.speed_spin.setRange(0.1, 4.0)
+        self.speed_spin.setDecimals(2)
+        self.speed_spin.setValue(1.0)
 
         self.fps_spin = QDoubleSpinBox()
         self.fps_spin.setRange(1.0, 240.0)
@@ -127,7 +134,7 @@ class ExportWindow(QWidget):
         layout.addRow("RAW-Datei", self._with_button(self.input_edit, input_btn))
         layout.addRow("Ausgabedatei", self._with_button(self.output_edit, output_btn))
         layout.addRow("Codec", self.codec_combo)
-        layout.addRow("Dauer (s)", self.duration_spin)
+        layout.addRow("Geschwindigkeit (x)", self.speed_spin)
         layout.addRow("FPS", self.fps_spin)
         layout.addRow("Pos. Farbe", self._with_button(self.pos_colour_edit, pos_colour_btn))
         layout.addRow("Neg. Farbe", self._with_button(self.neg_colour_edit, neg_colour_btn))
@@ -209,7 +216,7 @@ class ExportWindow(QWidget):
             QMessageBox.warning(self, "Fehlende Ausgabe", "Bitte einen Zielpfad angeben.")
             return
 
-        duration = self.duration_spin.value()
+        speed = self.speed_spin.value()
         fps = self.fps_spin.value()
         pos_colour = self.pos_colour_edit.text().strip() or None
         neg_colour = self.neg_colour_edit.text().strip() or None
@@ -227,13 +234,14 @@ class ExportWindow(QWidget):
             input_path,
             output_path,
             codec,
-            duration,
+            speed,
             fps,
             pos_colour,
             neg_colour,
         )
+        self.worker = worker
         self.worker.finished.connect(self._on_finished)
-        self.worker.failed.connect(self._on_failed)
+        self.worker.failed.connect(partial(self._on_failed, self.worker))
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker.failed.connect(self.worker.deleteLater)
         self.worker.start()
@@ -276,6 +284,7 @@ class ExportWindow(QWidget):
             self._output_custom = False
 
     def _on_finished(self, out_path: str) -> None:
+        self.worker = None
         self.status_label.setText(f"Fertig: {out_path}")
         self.export_btn.setEnabled(True)
         QMessageBox.information(self, "Export abgeschlossen", f"Video gespeichert unter:\n{out_path}")
