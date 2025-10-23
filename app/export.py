@@ -3,8 +3,9 @@
 This script provides a command-line interface to render and export
 event streams to video files without starting the GUI.  It uses the
 same pipeline and filters as the interactive application but operates
-entirely off‑screen.  The rendered frames are streamed to an FFmpeg
-process with parameters chosen according to the requested codec.
+entirely off‑screen.  Frames are rendered in memory and fed into an
+OpenCV ``VideoWriter`` instance, mirroring the approach used by the
+main GUI exporter so no external FFmpeg binary is required.
 
 Example usage:
 
@@ -17,8 +18,7 @@ Example usage:
 Supported codecs:
 
 * **ffv1** - lossless Matroska using FFV1 level 3
-* **x264-lossless** - visually lossless H.264
-* **x265-lossless** - visually lossless H.265
+* **mp4** - H.264-compatible MP4 using OpenCV's ``mp4v`` encoder
 
 Note that the Metavision SDK must be installed to read RAW files.  If
 the SDK is missing, this script will raise a ``RuntimeError``.
@@ -27,9 +27,7 @@ the SDK is missing, this script will raise a ``RuntimeError``.
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -74,100 +72,43 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--codec",
         type=str,
         default="ffv1",
-        choices=["ffv1", "x264-lossless", "x265-lossless"],
+        choices=["ffv1", "mp4"],
         help="Video codec to use",
     )
     return parser.parse_args(argv)
 
 
-def build_ffmpeg_command(width: int, height: int, fps: float, out_path: str, codec: str) -> list[str]:
-    """Construct the FFmpeg command for the given parameters.
+def _create_video_writer(out_path: str, codec: str, fps: float, frame_size: tuple[int, int]):
+    """Initialise an OpenCV ``VideoWriter`` for the requested codec."""
 
-    Parameters
-    ----------
-    width, height:
-        Frame dimensions.
-    fps:
-        Frame rate.
-    out_path:
-        Output file path.
-    codec:
-        One of ``"ffv1"``, ``"x264-lossless"`` or ``"x265-lossless"``.
+    try:
+        import cv2
+    except Exception as exc:  # pragma: no cover - OpenCV optional in CI
+        raise RuntimeError(
+            "OpenCV mit VideoWriter-Unterstützung ist erforderlich, konnte jedoch nicht importiert werden."
+        ) from exc
 
-    Returns
-    -------
-    list[str]
-        The command line arguments for invoking ``ffmpeg``.
-    """
-    cmd = [
-        "ffmpeg",
-        "-y",  # overwrite output without asking
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        f"{fps}",
-        "-i",
-        "-",  # read video from stdin
-    ]
-    if codec == "ffv1":
-        cmd += [
-            "-c:v",
-            "ffv1",
-            "-level",
-            "3",
-            "-coder",
-            "1",
-            "-context",
-            "1",
-            "-g",
-            "1",
-            "-slices",
-            "16",
-            "-slicecrc",
-            "1",
-            "-pix_fmt",
-            "rgb24",
-            "-f",
-            "matroska",
-            out_path,
-        ]
-    elif codec == "x264-lossless":
-        cmd += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "slow",
-            "-crf",
-            "0",
-            "-pix_fmt",
-            "yuv444p",
-            "-movflags",
-            "+faststart",
-            out_path,
-        ]
-    elif codec == "x265-lossless":
-        cmd += [
-            "-c:v",
-            "libx265",
-            "-x265-params",
-            "lossless=1",
-            "-pix_fmt",
-            "yuv444p",
-            "-movflags",
-            "+faststart",
-            out_path,
-        ]
+    lower = codec.lower()
+    if lower == "ffv1":
+        fourcc = cv2.VideoWriter_fourcc(*"FFV1")
+    elif lower in {"mp4", "x264-lossless"}:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    elif lower == "x265-lossless":
+        # OpenCV builds rarely ship with HEVC; guide the user to supported codecs
+        raise RuntimeError("HEVC/x265-Export wird nicht unterstützt. Bitte 'mp4' oder 'ffv1' verwenden.")
     else:
         raise ValueError(f"Unsupported codec: {codec}")
-    return cmd
+
+    writer = cv2.VideoWriter(out_path, fourcc, fps, frame_size)
+    if not writer.isOpened():
+        raise RuntimeError(
+            f"Videoausgabe konnte nicht initialisiert werden (Pfad oder Codec ungültig?): {out_path}"
+        )
+    return writer
 
 
 def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: float, fps: float, out_path: str, codec: str) -> None:
-    """Render a stream and write it to a video file via FFmpeg.
+    """Render a stream and write it to a video file via OpenCV.
 
     Parameters
     ----------
@@ -182,26 +123,14 @@ def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: floa
     out_path:
         Destination file path.
     codec:
-        Codec string; passed to :func:`build_ffmpeg_command`.
+        Codec string understood by :func:`_create_video_writer`.
     """
     width = reader.metadata.width
     height = reader.metadata.height
     frame_interval_us = int(1e6 / fps)
     max_time_us = int(duration_s * 1e6)
-    ffmpeg_cmd = build_ffmpeg_command(width, height, fps, out_path, codec)
-    # Start FFmpeg process
-    try:
-        proc = subprocess.Popen(
-            ffmpeg_cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            "FFmpeg konnte nicht gestartet werden. "
-            "Bitte stellen Sie sicher, dass 'ffmpeg' installiert ist und sich im PATH befindet."
-        ) from exc
+    frame_size = (int(width), int(height))
+    writer = _create_video_writer(out_path, codec, fps, frame_size)
     # Event accumulation and rendering loop
     current_buffer: list[np.ndarray] = []
     accumulated_time = 0
@@ -234,20 +163,17 @@ def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: floa
                 # Run through the pipeline
                 state = pipeline.process_events(frame_events)
                 frame = pipeline.get_frame(state)
-                # Write raw frame data to ffmpeg
-                proc.stdin.write(frame.tobytes())  # type: ignore[union-attr]
+                if frame.dtype != np.uint8:
+                    frame = np.clip(frame, 0, 255).astype(np.uint8)
+                # OpenCV expects BGR order
+                writer.write(frame[..., ::-1])
                 accumulated_time = cutoff_time
                 if accumulated_time >= max_time_us:
                     break
             if accumulated_time >= max_time_us:
                 break
     finally:
-        # Flush and close FFmpeg
-        try:
-            if proc.stdin:
-                proc.stdin.close()
-        finally:
-            proc.wait()
+        writer.release()
 
 
 def main(argv: list[str] | None = None) -> int:

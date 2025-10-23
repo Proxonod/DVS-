@@ -65,7 +65,7 @@ class ExportWorker(QThread):
             pipeline = _build_pipeline(reader.metadata.width, reader.metadata.height)
             pipeline.pos_colour = _parse_colour(self.pos_colour, pipeline.pos_colour)
             pipeline.neg_colour = _parse_colour(self.neg_colour, pipeline.neg_colour)
-            codec = "ffv1" if self.codec == "ffv1" else "x264-lossless"
+            codec = "ffv1" if self.codec == "ffv1" else "mp4"
             duration_us = reader.metadata.duration_us
             if duration_us is None or duration_us <= 0:
                 duration_us = reader.estimate_duration_us()
