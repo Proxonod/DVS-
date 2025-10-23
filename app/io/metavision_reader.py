@@ -139,6 +139,85 @@ class MetavisionReader:
         except Exception:
             pass
 
+    def ensure_sensor_size(self, max_chunks: int = 1000) -> Optional[tuple[int, int]]:
+        """Ensure ``metadata.width``/``height`` are populated.
+
+        When RAW metadata does not expose the sensor geometry the export
+        pipeline crashes later when attempting to convert ``None`` to
+        integers.  To avoid this we try to recover the width/height by
+        reopening the iterator (for recorded files) and inspecting a
+        couple of event chunks.  On success the metadata is updated in
+        place and the discovered dimensions are returned.
+        """
+
+        width = self.metadata.width
+        height = self.metadata.height
+        if width is not None and height is not None:
+            return int(width), int(height)
+
+        if self._source_path is None or EventsIterator is None:
+            return None
+
+        try:
+            it = EventsIterator(self._source_path, mode="delta_t", delta_t=self.delta_t_us)
+        except Exception:
+            return None
+
+        width_guess = width
+        height_guess = height
+        try:
+            for getter in ("get_sensor_width", "width"):
+                if width_guess is not None:
+                    break
+                try:
+                    val = getattr(it, getter)
+                    width_guess = int(val() if callable(val) else val)
+                except Exception:
+                    pass
+
+            for getter in ("get_sensor_height", "height"):
+                if height_guess is not None:
+                    break
+                try:
+                    val = getattr(it, getter)
+                    height_guess = int(val() if callable(val) else val)
+                except Exception:
+                    pass
+
+            iterator = iter(it)
+            for _ in range(max_chunks):
+                if width_guess is not None and height_guess is not None:
+                    break
+                try:
+                    events = next(iterator)
+                except StopIteration:
+                    break
+                if events.size == 0:
+                    continue
+                if width_guess is None:
+                    try:
+                        width_guess = int(events["x"].max()) + 1
+                    except Exception:
+                        pass
+                if height_guess is None:
+                    try:
+                        height_guess = int(events["y"].max()) + 1
+                    except Exception:
+                        pass
+        finally:
+            try:
+                if hasattr(it, "close"):
+                    it.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        if width_guess is not None and height_guess is not None:
+            self.metadata.width = int(width_guess)
+            self.metadata.height = int(height_guess)
+            return int(width_guess), int(height_guess)
+
+        return None
+
     def estimate_duration_us(self, max_chunks: int = 500000, delta_t_us: int = 100000) -> Optional[int]:
         """Estimate duration by scanning to the end once using a fresh iterator."""
         if self._source_path is None or EventsIterator is None:

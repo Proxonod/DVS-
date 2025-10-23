@@ -127,6 +127,12 @@ def export_stream(reader: MetavisionReader, pipeline: Pipeline, duration_s: floa
     """
     width = reader.metadata.width
     height = reader.metadata.height
+    if width is None or height is None:
+        dims = reader.ensure_sensor_size()
+        if dims is not None:
+            width, height = dims
+    if width is None or height is None:
+        raise RuntimeError("Sensorauflösung konnte nicht ermittelt werden.")
     frame_interval_us = int(1e6 / fps)
     max_time_us = int(duration_s * 1e6)
     frame_size = (int(width), int(height))
