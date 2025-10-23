@@ -239,12 +239,13 @@ class ExportWindow(QWidget):
             pos_colour,
             neg_colour,
         )
+        worker.finished.connect(self._on_finished)
+        worker.failed.connect(partial(self._on_failed, worker))
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+
         self.worker = worker
-        self.worker.finished.connect(self._on_finished)
-        self.worker.failed.connect(partial(self._on_failed, self.worker))
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.worker.failed.connect(self.worker.deleteLater)
-        self.worker.start()
+        worker.start()
 
     def _on_input_changed(self, _: str) -> None:
         self._update_default_output()
