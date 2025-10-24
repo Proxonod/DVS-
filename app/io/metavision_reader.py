@@ -8,8 +8,9 @@ infer width/height from events and estimate duration by scanning once.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
-from typing import Optional
+from typing import Deque, Optional
 
 import numpy as np
 
@@ -45,6 +46,7 @@ class MetavisionReader:
 
     def __init__(self, iterator, metadata: StreamMetadata) -> None:
         # EventsIterator is iterable, wrap into a real iterator
+        self._iterator_source = iterator
         try:
             self._iterator = iter(iterator)
         except TypeError:
@@ -53,6 +55,10 @@ class MetavisionReader:
         self._done = False
         self._source_path: Optional[str] = None  # set for RAW
         self.delta_t_us: int = 5000  # default; constructors override
+        # Prefetched chunks that were consumed for metadata inspection.
+        # They are replayed before pulling new data from the underlying iterator
+        # so no events are lost when we probe the stream for dimensions.
+        self._prefetched: Deque[np.ndarray] = deque()
 
     # -------- constructors --------
 
@@ -122,6 +128,8 @@ class MetavisionReader:
     def __next__(self) -> np.ndarray:
         if self._done:
             raise StopIteration
+        if self._prefetched:
+            return self._prefetched.popleft()
         try:
             events = next(self._iterator)
         except StopIteration:
@@ -145,9 +153,9 @@ class MetavisionReader:
         When RAW metadata does not expose the sensor geometry the export
         pipeline crashes later when attempting to convert ``None`` to
         integers.  To avoid this we try to recover the width/height by
-        reopening the iterator (for recorded files) and inspecting a
-        couple of event chunks.  On success the metadata is updated in
-        place and the discovered dimensions are returned.
+        peeking into a couple of event chunks from the existing iterator.
+        The consumed chunks are queued internally so callers still receive
+        the full stream.
         """
 
         width = self.metadata.width
@@ -155,61 +163,55 @@ class MetavisionReader:
         if width is not None and height is not None:
             return int(width), int(height)
 
-        if self._source_path is None or EventsIterator is None:
-            return None
-
-        try:
-            it = EventsIterator(self._source_path, mode="delta_t", delta_t=self.delta_t_us)
-        except Exception:
-            return None
-
         width_guess = width
         height_guess = height
-        try:
+        source = getattr(self, "_iterator_source", None)
+        if source is not None:
             for getter in ("get_sensor_width", "width"):
                 if width_guess is not None:
                     break
                 try:
-                    val = getattr(it, getter)
+                    val = getattr(source, getter)
+                except AttributeError:
+                    continue
+                try:
                     width_guess = int(val() if callable(val) else val)
                 except Exception:
                     pass
-
             for getter in ("get_sensor_height", "height"):
                 if height_guess is not None:
                     break
                 try:
-                    val = getattr(it, getter)
+                    val = getattr(source, getter)
+                except AttributeError:
+                    continue
+                try:
                     height_guess = int(val() if callable(val) else val)
                 except Exception:
                     pass
-
-            iterator = iter(it)
-            for _ in range(max_chunks):
-                if width_guess is not None and height_guess is not None:
-                    break
-                try:
-                    events = next(iterator)
-                except StopIteration:
-                    break
-                if events.size == 0:
-                    continue
-                if width_guess is None:
-                    try:
-                        width_guess = int(events["x"].max()) + 1
-                    except Exception:
-                        pass
-                if height_guess is None:
-                    try:
-                        height_guess = int(events["y"].max()) + 1
-                    except Exception:
-                        pass
-        finally:
+        inspected = 0
+        while inspected < max_chunks:
+            if width_guess is not None and height_guess is not None:
+                break
             try:
-                if hasattr(it, "close"):
-                    it.close()  # type: ignore[attr-defined]
-            except Exception:
-                pass
+                events = next(self._iterator)
+            except StopIteration:
+                break
+            self._prefetched.append(events)
+            inspected += 1
+            if events.size == 0:
+                continue
+            dtype_names = getattr(events.dtype, "names", None)
+            if width_guess is None and dtype_names and "x" in dtype_names:
+                try:
+                    width_guess = int(events["x"].max()) + 1
+                except Exception:
+                    pass
+            if height_guess is None and dtype_names and "y" in dtype_names:
+                try:
+                    height_guess = int(events["y"].max()) + 1
+                except Exception:
+                    pass
 
         if width_guess is not None and height_guess is not None:
             self.metadata.width = int(width_guess)
