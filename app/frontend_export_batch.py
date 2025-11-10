@@ -9,6 +9,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QColorDialog,
     QFileDialog,
     QFormLayout,
@@ -40,6 +41,7 @@ class BatchExportWorker(QThread):
         fps: float,
         pos_colour: str | None,
         neg_colour: str | None,
+        export_codecs: Iterable[str],
     ) -> None:
         super().__init__()
         self.directory = Path(directory)
@@ -47,6 +49,7 @@ class BatchExportWorker(QThread):
         self.fps = fps
         self.pos_colour = pos_colour
         self.neg_colour = neg_colour
+        self.export_codecs = tuple(export_codecs)
 
     def _iter_raw_files(self) -> Iterable[Path]:
         for path in sorted(self.directory.glob("*.raw")):
@@ -94,7 +97,8 @@ class BatchExportWorker(QThread):
             "ffv1": raw_path.with_suffix(".mkv"),
         }
 
-        for codec, out_path in targets.items():
+        for codec in self.export_codecs:
+            out_path = targets[codec]
             self.progress.emit(f"→ {raw_path.name} -> {out_path.name}")
             reader = MetavisionReader.from_raw(str(raw_path))
             try:
@@ -147,6 +151,11 @@ class BatchExportWindow(QWidget):
         neg_colour_btn = QPushButton("Wählen…")
         neg_colour_btn.clicked.connect(lambda: self._choose_colour(self.neg_colour_edit))
 
+        self.mp4_check = QCheckBox("MP4")
+        self.mp4_check.setChecked(True)
+        self.ffv1_check = QCheckBox("FFV1")
+        self.ffv1_check.setChecked(True)
+
         self.status_label = QLabel("Bereit")
 
         self.export_btn = QPushButton("Batch Export starten")
@@ -158,6 +167,7 @@ class BatchExportWindow(QWidget):
         layout.addRow("FPS", self.fps_spin)
         layout.addRow("Pos. Farbe", self._with_button(self.pos_colour_edit, pos_colour_btn))
         layout.addRow("Neg. Farbe", self._with_button(self.neg_colour_edit, neg_colour_btn))
+        layout.addRow("Formate", self._format_selector())
         layout.addRow(self.export_btn)
         layout.addRow(self.status_label)
 
@@ -215,10 +225,23 @@ class BatchExportWindow(QWidget):
         pos_colour = self.pos_colour_edit.text().strip() or None
         neg_colour = self.neg_colour_edit.text().strip() or None
 
+        export_codecs = []
+        if self.mp4_check.isChecked():
+            export_codecs.append("mp4")
+        if self.ffv1_check.isChecked():
+            export_codecs.append("ffv1")
+        if not export_codecs:
+            QMessageBox.warning(
+                self,
+                "Kein Format gewählt",
+                "Bitte wählen Sie mindestens ein Zielformat aus.",
+            )
+            return
+
         self.export_btn.setEnabled(False)
         self.status_label.setText("Export läuft…")
 
-        worker = BatchExportWorker(directory, speed, fps, pos_colour, neg_colour)
+        worker = BatchExportWorker(directory, speed, fps, pos_colour, neg_colour, export_codecs)
         worker.progress.connect(self._on_progress)
         worker.finished.connect(self._on_finished)
         worker.failed.connect(self._on_failed)
@@ -226,6 +249,15 @@ class BatchExportWindow(QWidget):
         worker.failed.connect(worker.deleteLater)
         self.worker = worker
         worker.start()
+
+    def _format_selector(self) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.mp4_check)
+        layout.addWidget(self.ffv1_check)
+        layout.addStretch(1)
+        return container
 
     def _on_progress(self, message: str) -> None:
         self.status_label.setText(message)
